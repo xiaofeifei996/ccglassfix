@@ -15,7 +15,7 @@ jobs:
           SDK=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=15.0 \
             -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 -fvisibility=hidden \
-            -framework Foundation -o CCFixProbe.dylib probe/CCFixProbe.m
+            -framework Foundation -framework UIKit -o CCFixProbe.dylib probe/CCFixProbe.m
           file CCFixProbe.dylib
           ls -la CCFixProbe.dylib
       - name: Publish dylib as release asset
