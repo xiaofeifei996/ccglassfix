@@ -21,7 +21,7 @@ jobs:
             -framework Foundation -framework UIKit -o CCGlassFix.dylib tweak/CCGlassFix.m
           xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=15.0 \
             -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 -fvisibility=hidden \
-            -framework Foundation -framework UIKit -framework QuartzCore \
+            -framework Foundation -framework UIKit -framework QuartzCore -framework CoreGraphics \
             -o CCLayerProbe.dylib probe/CCLayerProbe.m
           file CCFixProbe.dylib CCGlassFix.dylib CCLayerProbe.dylib
           ls -la *.dylib
