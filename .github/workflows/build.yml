@@ -19,7 +19,11 @@ jobs:
           xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=15.0 \
             -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 -fvisibility=hidden \
             -framework Foundation -framework UIKit -o CCGlassFix.dylib tweak/CCGlassFix.m
-          file CCFixProbe.dylib CCGlassFix.dylib
+          xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 -fvisibility=hidden \
+            -framework Foundation -framework UIKit -framework QuartzCore \
+            -o CCLayerProbe.dylib probe/CCLayerProbe.m
+          file CCFixProbe.dylib CCGlassFix.dylib CCLayerProbe.dylib
           ls -la *.dylib
       - name: Publish dylib as release asset
         uses: softprops/action-gh-release@v2
@@ -29,4 +33,5 @@ jobs:
           files: |
             CCFixProbe.dylib
             CCGlassFix.dylib
+            CCLayerProbe.dylib
           fail_on_unmatched_files: true
