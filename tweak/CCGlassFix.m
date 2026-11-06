@@ -1,5 +1,6 @@
-// CCGlassFix v7 - 控制中心 + App资源库 白底板 -> 深色(可配置)
-// v7: hook CALayer setBackgroundColor: 源头替换白色底板; 0.25s 巡查兜底
+// CCGlassFix v8 - 控制中心 + App资源库 白底板 -> 深色(可配置)
+// v8: 白底板登记进弱引用表 + CADisplayLink 逐帧看护(变白的帧立刻压回深色, 消除闪烁)
+//     + hook UIView/CALayer setBackgroundColor: 双保险 + 0.25s 巡查发现新底板
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -10,9 +11,11 @@ static CGFloat gGray = 0.13;
 static CGFloat gAlpha = 0.92;
 static NSTimeInterval gLastLogTime = 0;
 static int gTotalRecolored = 0;
-static int gHookSwaps = 0;
+static int gFrameFixes = 0;       // displayLink 帧内修复次数(累计)
 static CGColorRef gTargetColor = NULL;
-static BOOL gGlassDisabledCached = NO;  // 由 tick 每 0.25s 刷新
+static UIColor *gTargetUIColor = nil;
+static BOOL gGlassDisabledCached = NO;
+static NSHashTable *gPlates = nil;  // 已登记底板图层(弱引用)
 
 static void CCGFLog(NSString *msg) {
     @autoreleasepool {
@@ -44,10 +47,10 @@ static void CCGFLoadColor(void) {
         if (p[@"gray255"]) gGray = [p[@"gray255"] doubleValue] / 255.0;
         if (gTargetColor) CGColorRelease(gTargetColor);
         gTargetColor = CGColorCreateGenericGray(gGray, gAlpha);
+        gTargetUIColor = [UIColor colorWithCGColor:gTargetColor];
     }
 }
 
-// 颜色是否"接近纯白的不透明色"
 static BOOL CCGFColorIsWhite(CGColorRef c) {
     if (!c) return NO;
     size_t n = CGColorGetNumberOfComponents(c);
@@ -58,6 +61,11 @@ static BOOL CCGFColorIsWhite(CGColorRef c) {
     else if (n == 2) { r = g = b = co[0]; a = co[1]; }
     else return NO;
     return r > 0.82 && g > 0.82 && b > 0.82 && a > 0.5;
+}
+
+static BOOL CCGFLayerShapeOK(CALayer *layer) {
+    CGFloat area = layer.frame.size.width * layer.frame.size.height;
+    return layer.cornerRadius >= 15.0 || area > 40000.0;
 }
 
 // 沿 superlayer 链判断该图层是否处于 控制中心 / App资源库 容器内
@@ -76,17 +84,12 @@ static BOOL CCGFLayerInTarget(CALayer *layer) {
     return NO;
 }
 
-// ---------- 巡查兜底 ----------
-static BOOL CCGFIsWhitePlate(CALayer *layer) {
-    if (!CCGFColorIsWhite(layer.backgroundColor)) return NO;
-    CGFloat area = layer.frame.size.width * layer.frame.size.height;
-    return layer.cornerRadius >= 15.0 || area > 40000.0;
-}
-
+// ---------- 巡查发现新底板 ----------
 static int CCGFRecolor(CALayer *layer, CGColorRef target) {
     int changed = 0;
-    if (CCGFIsWhitePlate(layer)) {
+    if (CCGFColorIsWhite(layer.backgroundColor) && CCGFLayerShapeOK(layer)) {
         layer.backgroundColor = target;
+        [gPlates addObject:layer];
         changed++;
     }
     for (CALayer *sub in layer.sublayers) changed += CCGFRecolor(sub, target);
@@ -94,7 +97,7 @@ static int CCGFRecolor(CALayer *layer, CGColorRef target) {
 }
 
 static void CCGFApplyToWindow(UIView *win, NSString *from) {
-    if (!CCGFGlassDisabled() || !gTargetColor) return;
+    if (!gGlassDisabledCached || !gTargetColor) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     int changed = CCGFRecolor(win.layer, gTargetColor);
@@ -104,8 +107,8 @@ static void CCGFApplyToWindow(UIView *win, NSString *from) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLogTime > 1.0) {
             gLastLogTime = now;
-            CCGFLog([NSString stringWithFormat:@"%@: recolored %d (total %d, hookSwaps=%d)",
-                     from, changed, gTotalRecolored, gHookSwaps]);
+            CCGFLog([NSString stringWithFormat:@"%@: discovered %d (plates=%lu, frameFixes=%d)",
+                     from, changed, (unsigned long)gPlates.count, gFrameFixes]);
         }
     }
 }
@@ -131,30 +134,60 @@ static void CCGFTick(void) {
             BOOL isLib = [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"];
             if (!isCC && !isLib) {
                 if (![cn containsString:@"HomeScreen"]) continue;
-                if (!CCGFHasLibrary(w, 7)) continue;  // 资源库挂在主屏窗口时
+                if (!CCGFHasLibrary(w, 7)) continue;
             }
             CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
         }
     }
 }
 
-// ---------- 源头 hook: CALayer setBackgroundColor: ----------
+// ---------- 逐帧看护: 登记过的底板一旦变白立刻压回 ----------
+static void CCGFWatchPlates(void) {
+    if (!gGlassDisabledCached || !gTargetColor || gPlates.count == 0) return;
+    NSArray *all = gPlates.allObjects;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *l in all) {
+        if (CCGFColorIsWhite(l.backgroundColor)) {
+            l.backgroundColor = gTargetColor;
+            gFrameFixes++;
+        }
+    }
+    [CATransaction commit];
+}
+
+// ---------- 源头 hook 双保险 ----------
 typedef void (*SetBGIMP)(id, SEL, CGColorRef);
 static SetBGIMP gOrigSetBG = NULL;
 
 static void CCGFSetBGColor(id self, SEL sel, CGColorRef color) {
     if (color && gTargetColor && gGlassDisabledCached && CCGFColorIsWhite(color)) {
         CALayer *layer = (CALayer *)self;
-        CGFloat area = layer.frame.size.width * layer.frame.size.height;
-        if ((layer.cornerRadius >= 15.0 || area > 40000.0) && CCGFLayerInTarget(layer)) {
+        if (CCGFLayerShapeOK(layer) && CCGFLayerInTarget(layer)) {
             color = gTargetColor;
-            gHookSwaps++;
+            [gPlates addObject:layer];
+            gFrameFixes++;
         }
     }
     gOrigSetBG(self, sel, color);
 }
 
-// ---------- SBControlCenterWindow hooks (快速触发) ----------
+typedef void (*UIViewSetBGIMP)(id, SEL, UIColor *);
+static UIViewSetBGIMP gOrigUIViewSetBG = NULL;
+
+static void CCGFUIViewSetBG(id self, SEL sel, UIColor *color) {
+    if (color && gTargetUIColor && gGlassDisabledCached && CCGFColorIsWhite(color.CGColor)) {
+        UIView *v = (UIView *)self;
+        if (CCGFLayerShapeOK(v.layer) && CCGFLayerInTarget(v.layer)) {
+            color = gTargetUIColor;
+            [gPlates addObject:v.layer];
+            gFrameFixes++;
+        }
+    }
+    gOrigUIViewSetBG(self, sel, color);
+}
+
+// ---------- SBControlCenterWindow hooks ----------
 typedef id (*InitSceneIMP)(id, SEL, id);
 typedef void (*SetHiddenIMP)(id, SEL, BOOL);
 
@@ -179,9 +212,10 @@ static void CCGFHookWin(Class cls, SEL sel) {
 
 __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
+        gPlates = [NSHashTable weakObjectsHashTable];
         CCGFLoadColor();
         CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f a=%.2f", getpid(), gGray, gAlpha]);
-        // 1) 全局拦截 backgroundColor 设置(仅 SpringBoard 进程, 由 plist filter 保证)
+        // 1) CALayer 级 hook
         Method m = class_getInstanceMethod([CALayer class], @selector(setBackgroundColor:));
         if (m) {
             gOrigSetBG = (SetBGIMP)method_getImplementation(m);
@@ -189,10 +223,17 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
                 CCGFSetBGColor(self, @selector(setBackgroundColor:), c);
             }));
             CCGFLog(@"hooked CALayer setBackgroundColor:");
-        } else {
-            CCGFLog(@"no CALayer setBackgroundColor:");
         }
-        // 2) 窗口 hook
+        // 2) UIView 级 hook
+        Method mv = class_getInstanceMethod([UIView class], @selector(setBackgroundColor:));
+        if (mv) {
+            gOrigUIViewSetBG = (UIViewSetBGIMP)method_getImplementation(mv);
+            method_setImplementation(mv, imp_implementationWithBlock(^void(id self, UIColor *c){
+                CCGFUIViewSetBG(self, @selector(setBackgroundColor:), c);
+            }));
+            CCGFLog(@"hooked UIView setBackgroundColor:");
+        }
+        // 3) 窗口 hook
         Class winCls = NSClassFromString(@"SBControlCenterWindow");
         if (winCls) {
             CCGFHookWin(winCls, @selector(initWithWindowScene:));
@@ -200,11 +241,17 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         } else {
             CCGFLog(@"SBControlCenterWindow NOT FOUND");
         }
-        // 3) 巡查兜底
+        // 4) 巡查发现新底板
         NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
-        CCGFLog(@"hooks installed + ticker 0.25s");
+        // 5) 逐帧看护登记底板
+        CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
+            @autoreleasepool { CCGFWatchPlates(); }
+        }] selector:@selector(main)];
+        dl.preferredFramesPerSecond = 30;
+        [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+        CCGFLog(@"v8 installed: hooks + tick 0.25s + displayLink 30fps watch");
     }
 }
