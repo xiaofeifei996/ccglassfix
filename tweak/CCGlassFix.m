@@ -1,5 +1,5 @@
-// CCGlassFix v5 - 控制中心白底板 -> 深色(可配置)
-// v5: 秒级巡查所有 ControlCenter 窗口; 大圆角或"大面积白块"都改色(覆盖放大面板)
+// CCGlassFix v6 - 控制中心 + App资源库 白底板 -> 深色(可配置)
+// v6: 目标窗口加 Library; 发现目标时定期 dump 窗口类名清单便于定位
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -91,20 +91,59 @@ static void CCGFApplyToWindow(UIView *win, NSString *from) {
     }
 }
 
-// 是否控制中心相关窗口
-static BOOL CCGFIsCCWindow(UIWindow *w) {
+static NSTimeInterval gLastWinDump = 0;
+static void CCGFDumpWindows(void) {
+    @autoreleasepool {
+        UIApplication *app = [UIApplication sharedApplication];
+        if (!app) return;
+        NSMutableString *ms = [NSMutableString stringWithString:@"windows:"];
+        for (UIWindow *w in app.windows) {
+            NSString *cn = NSStringFromClass([w class]);
+            [ms appendFormat:@" %@[h=%d,a=%.2f]", cn, (int)w.hidden, w.alpha];
+        }
+        CCGFLog(ms);
+    }
+}
+
+// 深度受限地找窗口内是否有资源库视图
+static BOOL CCGFHasLibrary(UIView *v, int depth) {
+    if (depth <= 0) return NO;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"Library"]) return YES;
+    for (UIView *s in v.subviews)
+        if (CCGFHasLibrary(s, depth - 1)) return YES;
+    return NO;
+}
+
+static BOOL CCGFIsHomeScreen(UIWindow *w) {
     NSString *cn = NSStringFromClass([w class]);
-    return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+    return [cn containsString:@"HomeScreen"];
 }
 
 static void CCGFTick(void) {
     @autoreleasepool {
         UIApplication *app = [UIApplication sharedApplication];
         if (!app) return;
+        BOOL anyTarget = NO;
         for (UIWindow *w in app.windows) {
-            if (!CCGFIsCCWindow(w)) continue;
             if (w.hidden || w.alpha < 0.05) continue;
-            CCGFApplyToWindow(w, @"tick");
+            NSString *cn = NSStringFromClass([w class]);
+            BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+            BOOL isLib = [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"];
+            BOOL isHomeLib = NO;
+            if (!isCC && !isLib && CCGFIsHomeScreen(w))
+                isHomeLib = CCGFHasLibrary(w, 7);  // 资源库若挂在主屏窗口里
+            if (!isCC && !isLib && !isHomeLib) continue;
+            anyTarget = YES;
+            CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
+        }
+        // 有目标窗口可见时, 每 30s 记录一次窗口清单(定位资源库真实窗口)
+        if (anyTarget) {
+            NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+            if (now - gLastWinDump > 30.0) {
+                gLastWinDump = now;
+                CCGFDumpWindows();
+            }
         }
     }
 }
