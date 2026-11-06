@@ -1,0 +1,27 @@
+name: build
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build probe dylib (arm64e)
+        run: |
+          set -e
+          SDK=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang -arch arm64e -miphoneos-version-min=15.0 \
+            -isysroot "$SDK" -dynamiclib -fobjc-arc -O2 -fvisibility=hidden \
+            -framework Foundation -o CCFixProbe.dylib probe/CCFixProbe.m
+          file CCFixProbe.dylib
+          ls -la CCFixProbe.dylib
+      - name: Publish dylib as release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: probe
+          name: probe
+          files: CCFixProbe.dylib
+          fail_on_unmatched_files: true
