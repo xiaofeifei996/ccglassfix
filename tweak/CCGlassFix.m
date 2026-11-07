@@ -17,6 +17,7 @@ static UIColor *gTargetUIColor = nil;
 static BOOL gGlassDisabled = NO;
 static NSHashTable *gPlates = nil;
 static int gFixCount = 0;
+static NSTimeInterval gLastLogW = 0;
 static NSTimeInterval gLastLog = 0;
 static NSUInteger gHookClassCount = 0;
 
@@ -242,10 +243,66 @@ static void CCGETCMods(UIView *v, int depth) {
 }
 
 // ---------- 巡查 ----------
+
+static NSArray *CCGFAllWindows2(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    NSMutableArray *out = [NSMutableArray array];
+    if (!app) return out;
+    @try {
+        if ([app respondsToSelector:NSSelectorFromString(@"_allWindows")]) {
+            NSArray *a = [app performSelector:NSSelectorFromString(@"_allWindows")];
+            if ([a isKindOfClass:[NSArray class]]) [out addObjectsFromArray:a];
+        }
+    } @catch(...) {}
+    @try { [out addObjectsFromArray:app.windows]; } @catch(...) {}
+    return out;
+}
+
+static int CCGFCountWhite(CALayer *l, int depth) {
+    if (depth > 22 || !l) return 0;
+    int n = 0;
+    for (CALayer *sub in l.sublayers) n += CCGFCountWhite(sub, depth + 1);
+    CGFloat w = l.frame.size.width, h = l.frame.size.height;
+    if (w * h < 900) return n;
+    if (CCGFNearWhite(l.backgroundColor)) return n + 1;
+    if ([l isKindOfClass:[CAShapeLayer class]] && CCGFNearWhite(((CAShapeLayer *)l).fillColor)) return n + 1;
+    return n;
+}
+
+static int CCGFContainsCCUIView(UIView *v, int depth) {
+    if (depth > 10 || !v) return 0;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"CCUI"] || [cn containsString:@"ModuleView"]
+        || [cn containsString:@"ControlCenter"]) return 1;
+    for (UIView *s in v.subviews) if (CCGFContainsCCUIView(s, depth - 1)) return 1;
+    return 0;
+}
+
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
         UIWindow *w = CCGFCCWindow();
+        // 诊断 + 覆盖: 其它含 CCUI 内容的可见窗口也处理
+        for (UIWindow *ow in CCGFAllWindows2()) {
+            if (![ow isKindOfClass:[UIWindow class]]) continue;
+            if (ow.hidden || ow.alpha < 0.05) continue;
+            int wc = CCGFCountWhite(ow.layer, 0);
+            if (wc > 0) {
+                NSString *ocn = NSStringFromClass([ow class]);
+                NSTimeInterval tnow = [NSDate timeIntervalSinceReferenceDate];
+                if (tnow - gLastLogW > 2.0) {
+                    gLastLogW = tnow;
+                    CCGFLog([NSString stringWithFormat:@"WINW %@ white=%d ccui=%d",
+                             ocn, wc, CCGFContainsCCUIView(ow, 10)]);
+                }
+                if (CCGFContainsCCUIView(ow, 10)) {
+                    [CATransaction begin]; [CATransaction setDisableActions:YES];
+                    CCGFRecolorLayer(ow.layer);
+                    [CATransaction commit];
+                    CCGFKillMaterials(ow, 30);
+                }
+            }
+        }
         if (!w) return;
         CCGETCMods(w, 0);
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
@@ -288,6 +345,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v27 installed: CC modules only, window background untouched");
+        CCGFLog(@"v27w installed: probe all windows for white layers");
     }
 }
