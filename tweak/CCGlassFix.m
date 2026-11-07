@@ -53,6 +53,49 @@ static void CCGFLoadColor(void) {
     }
 }
 
+
+// 控制中心专用: 把"开启态"的白色实底(含渐变)压成深色, 贴近 iOS 18 的深灰控件
+static BOOL CCGFColorNearWhite(CGColorRef c) {
+    if (!c) return NO;
+    size_t n = CGColorGetNumberOfComponents(c);
+    const CGFloat *co = CGColorGetComponents(c);
+    if (!co) return NO;
+    CGFloat r, g, b, a;
+    if (n >= 4) { r = co[0]; g = co[1]; b = co[2]; a = co[3]; }
+    else if (n == 2) { r = g = b = co[0]; a = co[1]; }
+    else return NO;
+    return r > 0.72 && g > 0.72 && b > 0.72 && a > 0.4;
+}
+
+static int CCGFCCStrongRecolor(CALayer *l) {
+    int changed = 0;
+    for (CALayer *sub in l.sublayers) changed += CCGFCCStrongRecolor(sub);
+    CGFloat w = l.frame.size.width, h = l.frame.size.height;
+    if (w * h < 600) return changed;
+    BOOL did = NO;
+    if (CCGFColorNearWhite(l.backgroundColor)) { l.backgroundColor = gTargetColor; did = YES; }
+    if ([l isKindOfClass:[CAShapeLayer class]]) {
+        CGColorRef f = ((CAShapeLayer *)l).fillColor;
+        if (CCGFColorNearWhite(f)) { ((CAShapeLayer *)l).fillColor = gTargetColor; did = YES; }
+    }
+    if ([l isKindOfClass:[CAGradientLayer class]]) {
+        CAGradientLayer *g = (CAGradientLayer *)l;
+        NSArray *cols = g.colors;
+        BOOL anyWhite = NO;
+        for (id c in cols) {
+            if (CFGetTypeID((__bridge CFTypeRef)c) == CGColorGetTypeID()
+                && CCGFColorNearWhite((__bridge CGColorRef)c)) { anyWhite = YES; break; }
+        }
+        if (anyWhite) {
+            NSMutableArray *nw = [NSMutableArray array];
+            for (NSUInteger i = 0; i < cols.count; i++) [nw addObject:(__bridge id)gTargetColor];
+            g.colors = nw; did = YES;
+        }
+    }
+    if (did) { [gPlates addObject:l]; changed++; }
+    return changed;
+}
+
 static BOOL CCGFColorIsWhite(CGColorRef c) {
     if (!c) return NO;
     size_t n = CGColorGetNumberOfComponents(c);
@@ -253,6 +296,7 @@ static int CCGFRecolor(CALayer *layer) {
 }
 
 static int CCGFScanMaterials(UIView *v, int depth);
+static int CCGFCCStrongRecolor(CALayer *l);
 static NSString *CCGFChain(CALayer *l, int max);
 static void CCGFCCDiag(UIWindow *w);
 
@@ -294,7 +338,13 @@ static void CCGFTick(void) {
             if (w.hidden || w.alpha < 0.05) continue;
             NSString *cn = NSStringFromClass([w class]);
             BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
-            if (isCC) { CCGFApplyToView(w); CCGFCCDiag(w); continue; }
+            if (isCC) {
+                CCGFApplyToView(w);
+                [CATransaction begin]; [CATransaction setDisableActions:YES];
+                CCGFCCStrongRecolor(w.layer);
+                [CATransaction commit];
+                continue;
+            }
             if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
             if ([cn containsString:@"HomeScreen"]) {
                 // 主屏: 只处理 Search/Folder/Library 子树, 不动菜单与其它材质
@@ -557,6 +607,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v22 installed: + CC white-layer diagnostics");
+        CCGFLog(@"v23 installed: CC strong recolor (on-state white pills)");
     }
 }
