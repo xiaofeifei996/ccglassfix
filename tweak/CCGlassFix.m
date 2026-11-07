@@ -1,5 +1,5 @@
 // CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
-// v19: 主屏只处理 Search/Folder/Library 子树, 上下文菜单恢复系统原样
+// v20: 文件夹背景改用子视图染色, 与系统关闭动画同一时钟同步淡出
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -71,6 +71,8 @@ static BOOL CCGFClassIsTarget(NSString *cn) {
 }
 
 // 文件夹外面那层整屏材质(SBFolderControllerBackgroundView) - 白闪主犯
+static const void *kFolderTintKey = &kFolderTintKey;
+
 static BOOL CCGFIsFolderBgClass(NSString *cn) {
     return [cn containsString:@"SBFolderControllerBackground"]
         || [cn containsString:@"FolderControllerBackground"];
@@ -112,29 +114,37 @@ static BOOL CCGFFixMaterialView(UIView *v) {
     if (!CCGFIsMaterialClass(vcn) && !isFolderBg) return NO;
     if (!CCGFMatInScope(v)) return NO;
     BOOL did = NO;
-    // 文件夹外面那层整屏背景: 铺不透明深色(不做透明), 但绝不干预它自身的显示/隐藏,
-    // 这样系统关闭文件夹时的淡出动画能照常走完, 不会出现"背景延迟关闭"
+    // 文件夹外面那层整屏背景:
+    // 不直接改它的 backgroundColor/alpha(否则系统关闭动画淡出时不同步, 出现"延迟关闭")。
+    // 做法: 压掉内部材质 -> 再挂一个自绘深色子视图。子视图自动继承父层 alpha 动画,
+    // 打开/关闭/淡出全程与系统同一时钟, 天然同步。
     if (isFolderBg) {
         if ([v isKindOfClass:[UIVisualEffectView class]] && ((UIVisualEffectView *)v).effect != nil) {
             ((UIVisualEffectView *)v).effect = nil; did = YES;
         }
-        // 只压掉内部材质/backdrop 子层, 其它子层一律不动(否则关闭动画不同步)
-        for (UIView *s in v.subviews) {
-            NSString *scn = NSStringFromClass([s class]);
+        for (UIView *sub in v.subviews) {
+            NSString *scn = NSStringFromClass([sub class]);
             if (CCGFIsMaterialClass(scn)) {
-                s.backgroundColor = [UIColor clearColor];
-                if (!s.hidden) { s.hidden = YES; did = YES; }
+                sub.backgroundColor = [UIColor clearColor];
+                if (!sub.hidden) { sub.hidden = YES; did = YES; }
             }
         }
-        // 仅在它完整可见(未处于淡出)时铺色, 淡出过程中放手
-        if (v.alpha > 0.98) {
-            if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
-            if (v.layer.backgroundColor != gTargetColor) { v.layer.backgroundColor = gTargetColor; did = YES; }
+        UIView *tint = objc_getAssociatedObject(v, &kFolderTintKey);
+        if (!tint) {
+            tint = [[UIView alloc] initWithFrame:v.bounds];
+            tint.backgroundColor = gTargetUIColor;
+            tint.userInteractionEnabled = NO;
+            tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [v insertSubview:tint atIndex:0];
+            objc_setAssociatedObject(v, &kFolderTintKey, tint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            did = YES;
         }
+        if (!CGRectEqualToRect(tint.frame, v.bounds)) tint.frame = v.bounds;
         if (did) gMatFixes++;
         [gMats addObject:v];
         return did;
     }
+
     if ([v isKindOfClass:[UIVisualEffectView class]]) {
         UIVisualEffectView *ev = (UIVisualEffectView *)v;
         if (ev.effect != nil) { ev.effect = nil; did = YES; }
@@ -165,11 +175,8 @@ static void CCGFWatchMaterials(void) {
     if (!gGlassDisabledCached || !gTargetUIColor || gMats.count == 0) return;
     for (UIView *v in gMats.allObjects) {
         if (CCGFIsFolderBgClass(NSStringFromClass([v class]))) {
-            // 关闭动画进行中(alpha 下降)就完全放手
-            if (v.alpha <= 0.98) continue;
-            if (v.backgroundColor != gTargetUIColor) {
-                if (CCGFFixMaterialView(v)) gWatchFixes++;
-            }
+            UIView *tint = objc_getAssociatedObject(v, &kFolderTintKey);
+            if (!tint || tint.superview != v) { if (CCGFFixMaterialView(v)) gWatchFixes++; }
             continue;
         }
         if ([v isKindOfClass:[UIVisualEffectView class]]) {
@@ -487,6 +494,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v19 installed: scoped home scan, menus untouched");
+        CCGFLog(@"v20 installed: folder tint as subview (synced fade)");
     }
 }
