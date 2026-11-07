@@ -64,19 +64,13 @@ static BOOL CCGFIsCCWindow(UIWindow *w) {
     return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
 }
 
-// 模块库(添加控制)页面: 里面是小尺寸预览图标, 不处理
-static NSHashTable *gSkipRoots = nil;
-
-static BOOL CCGFInGallery(UIView *v) {
-    int hops = 0;
-    for (UIView *cur = v; cur && hops < 30; cur = cur.superview, hops++) {
-        if (!gSkipRoots) gSkipRoots = [NSHashTable weakObjectsHashTable];
-        if ([gSkipRoots containsObject:cur]) return YES;
-        NSString *cn = NSStringFromClass([cur class]);
-        if ([cn containsString:@"Gallery"] || [cn containsString:@"Picker"]
-            || [cn containsString:@"SearchControl"] || [cn containsString:@"Editor"]
-            || [cn containsString:@"LibraryView"]) return YES;
-    }
+// 控制中心里出现搜索框 => 说明是"添加控制"页面, 整窗跳过
+static BOOL CCGFHasSearchBar(UIView *v, int depth) {
+    if (depth > 30 || !v) return NO;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"SearchBar"] || [v isKindOfClass:[UITextField class]]
+        || [cn containsString:@"SearchTextField"] || [cn containsString:@"SearchControl"]) return YES;
+    for (UIView *sub in v.subviews) if (CCGFHasSearchBar(sub, depth + 1)) return YES;
     return NO;
 }
 
@@ -96,7 +90,6 @@ static int CCGFStamp(CALayer *l, int depth) {
     id d = l.delegate;
     if (d && [d isKindOfClass:[UIView class]]) {
         if (CCGFIsBgClass(NSStringFromClass([d class]))) return n;
-        if (CCGFInGallery((UIView *)d)) return n;   // 模块库页面不处理
     }
     // 已经盖过
     for (CALayer *c in l.sublayers) if ([c.name isEqualToString:kTintName]) return n;
@@ -149,6 +142,7 @@ static void CCGFTick(void) {
         if (!app) return;
         for (UIWindow *w in app.windows) {
             if (w.hidden || w.alpha < 0.05 || !CCGFIsCCWindow(w)) continue;
+            if (CCGFHasSearchBar(w, 0)) continue;   // 添加控制页: 不动
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             CCGFStamp(w.layer, 0);
@@ -166,7 +160,7 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
         CCGFLoadColor();
         gGlassDisabled = CCGFGlassOff();
-        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v31", getpid(), gGray]);
+        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v32", getpid(), gGray]);
         NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
@@ -176,6 +170,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 20;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v31 installed: + skip gallery/picker page");
+        CCGFLog(@"v32 installed: skip CC page only when search bar present");
     }
 }
