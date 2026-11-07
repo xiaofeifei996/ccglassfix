@@ -1,5 +1,5 @@
 // CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
-// v20: 文件夹背景改用子视图染色, 与系统关闭动画同一时钟同步淡出
+// v21: 资源库表头/包边毛玻璃改为透明(不再铺实色, 消除硬边方块)
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -81,6 +81,17 @@ static BOOL CCGFIsMaterialClass(NSString *cn) {
     return [cn containsString:@"VisualEffect"] || [cn containsString:@"Material"]
         || [cn containsString:@"Backdrop"];
 }
+// 表头/包边毛玻璃: SBFFeatherBlurView / 表头 之类, 铺实色会变成一块硬边方块
+static BOOL CCGFIsFeatherBlur(UIView *v) {
+    int hops = 0;
+    for (UIView *cur = v; cur && hops < 8; cur = cur.superview, hops++) {
+        NSString *cn = NSStringFromClass([cur class]);
+        if ([cn containsString:@"FeatherBlur"] || [cn containsString:@"HeaderView"]
+            || [cn containsString:@"TableHeader"]) return YES;
+    }
+    return NO;
+}
+
 static BOOL CCGFIsWallpaperClass(NSString *cn) {
     return [cn containsString:@"HomeScreenBackdrop"] || [cn containsString:@"Wallpaper"];
 }
@@ -149,6 +160,7 @@ static BOOL CCGFFixMaterialView(UIView *v) {
         UIVisualEffectView *ev = (UIVisualEffectView *)v;
         if (ev.effect != nil) { ev.effect = nil; did = YES; }
     }
+    BOOL feather = CCGFIsFeatherBlur(v);
     for (UIView *s in v.subviews) {
         NSString *scn = NSStringFromClass([s class]);
         if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"]) {
@@ -156,7 +168,13 @@ static BOOL CCGFFixMaterialView(UIView *v) {
             if (!s.hidden) { s.hidden = YES; did = YES; }
         }
     }
-    if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
+    if (feather) {
+        // 表头/包边: 透明, 让壁纸透出来(铺实色会出现上方那块硬边方块)
+        if (v.backgroundColor != [UIColor clearColor]) { v.backgroundColor = [UIColor clearColor]; did = YES; }
+        if (v.layer.backgroundColor != NULL) { v.layer.backgroundColor = NULL; did = YES; }
+    } else if (v.backgroundColor != gTargetUIColor) {
+        v.backgroundColor = gTargetUIColor; did = YES;
+    }
     if (did) gMatFixes++;
     [gMats addObject:v];
     return did;
@@ -182,7 +200,7 @@ static void CCGFWatchMaterials(void) {
         if ([v isKindOfClass:[UIVisualEffectView class]]) {
             if (((UIVisualEffectView *)v).effect != nil) {
                 ((UIVisualEffectView *)v).effect = nil;
-                v.backgroundColor = gTargetUIColor;
+                v.backgroundColor = CCGFIsFeatherBlur(v) ? [UIColor clearColor] : gTargetUIColor;
                 gWatchFixes++;
             }
         } else if (CCGFFixMaterialView(v)) gWatchFixes++;
@@ -494,6 +512,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v20 installed: folder tint as subview (synced fade)");
+        CCGFLog(@"v21 installed: feather-blur headers cleared to transparent");
     }
 }
