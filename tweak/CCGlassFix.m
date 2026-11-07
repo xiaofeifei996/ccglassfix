@@ -142,7 +142,6 @@ static void CCGFTick(void) {
         if (!app) return;
         for (UIWindow *w in app.windows) {
             if (w.hidden || w.alpha < 0.05 || !CCGFIsCCWindow(w)) continue;
-            if (CCGFHasSearchBar(w, 0)) continue;   // 添加控制页: 不动
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             CCGFStamp(w.layer, 0);
@@ -160,7 +159,7 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
         CCGFLoadColor();
         gGlassDisabled = CCGFGlassOff();
-        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v32", getpid(), gGray]);
+        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v33", getpid(), gGray]);
         NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
@@ -170,6 +169,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 20;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v32 installed: skip CC page only when search bar present");
+        CCGFLog(@"v33 installed: process all CC pages incl. add-controls");
     }
 }
