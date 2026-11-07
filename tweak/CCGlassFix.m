@@ -162,19 +162,41 @@ static void CCGFDiagOnce(UIWindow *w) {
     CCGFLog([NSString stringWithFormat:@"=== WHITE diag end count=%d ===", gDiagCount]);
 }
 
+// 尽量拿到全部窗口(iOS 26 里 app.windows 可能不含控制中心)
+static NSArray *CCGFAllWindows(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    NSMutableArray *out = [NSMutableArray array];
+    if (!app) return out;
+    @try {
+        if ([app respondsToSelector:NSSelectorFromString(@"_allWindows")]) {
+            NSArray *a = [app performSelector:NSSelectorFromString(@"_allWindows")];
+            if ([a isKindOfClass:[NSArray class]]) [out addObjectsFromArray:a];
+        }
+    } @catch(...) {}
+    @try { [out addObjectsFromArray:app.windows]; } @catch(...) {}
+    @try {
+        Class sbm = NSClassFromString(@"SBWindowScene");
+        if (sbm) {}
+    } @catch(...) {}
+    return out;
+}
+
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
         if (!gGlassDisabled || !gTargetColor) return;
-        UIApplication *app = [UIApplication sharedApplication];
-        if (!app) return;
-        for (UIWindow *w in app.windows) {
+        NSArray *wins = CCGFAllWindows();
+        if (wins.count == 0) return;
+        {
+        for (UIWindow *w in wins) {
+            if (![w isKindOfClass:[UIWindow class]]) continue;
             if (w.hidden || w.alpha < 0.05 || !CCGFIsCCWindow(w)) continue;
             [CATransaction begin];
             [CATransaction setDisableActions:YES];
             CCGFStamp(w.layer, 0);
             [CATransaction commit];
             if (gDiagDone < 2) CCGFDiagOnce(w);
+        }
         }
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLog > 5.0) {
@@ -199,5 +221,15 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         dl.preferredFramesPerSecond = 20;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
         CCGFLog(@"v33 installed: process all CC pages incl. add-controls");
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            @autoreleasepool {
+                NSMutableString *ms = [NSMutableString stringWithString:@"WINS:"];
+                for (UIWindow *w in CCGFAllWindows()) {
+                    if (![w isKindOfClass:[UIWindow class]]) continue;
+                    [ms appendFormat:@" %s(%d)", object_getClassName(w), (int)w.hidden];
+                }
+                CCGFLog(ms);
+            }
+        });
     }
 }
