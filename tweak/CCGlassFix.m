@@ -99,15 +99,27 @@ static int CCGFStamp(CALayer *l, int depth) {
         if (fabs(w - h) < 2.0) r = w / 2.0;
         else if (h < w * 0.66) r = h / 2.0;
     }
+    // 直接改色(最快见效, 也消掉白边本身的来源)
+    if (CCGFNearWhite(l.backgroundColor)) l.backgroundColor = gTargetColor;
+    if ([l isKindOfClass:[CAShapeLayer class]]
+        && CCGFNearWhite(((CAShapeLayer *)l).fillColor)) {
+        ((CAShapeLayer *)l).fillColor = gTargetColor;
+    }
+
+    // 再叠一层向外扩 2pt 的不透明深色, 由父层按原圆角裁掉 -> 抗锯齿白边被外部覆盖
     CALayer *tint = [CALayer layer];
     tint.name = kTintName;
-    tint.frame = l.bounds;
+    tint.frame = CGRectInset(l.bounds, -2.0, -2.0);
     tint.backgroundColor = gTargetColor;
-    tint.cornerRadius = r;
-    if (@available(iOS 13.0, *)) tint.cornerCurve = kCACornerCurveContinuous;
-    tint.masksToBounds = YES;
     tint.allowsEdgeAntialiasing = YES;
-    [l insertSublayer:tint atIndex:0];   // 图标等后面的子层仍在其上
+    if (r > 0.5) {
+        // 父层裁剪: 与白色背景同一圆角轮廓, 不多不少
+        l.masksToBounds = YES;
+        l.allowsEdgeAntialiasing = YES;
+        if (l.cornerRadius <= 0.5) l.cornerRadius = r;
+        if (@available(iOS 13.0, *)) l.cornerCurve = kCACornerCurveContinuous;
+    }
+    [l insertSublayer:tint atIndex:0];   // 图标等原有子层仍在其上
     gStamped++;
     return n + 1;
 }
@@ -137,7 +149,7 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
         CCGFLoadColor();
         gGlassDisabled = CCGFGlassOff();
-        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v29", getpid(), gGray]);
+        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v30", getpid(), gGray]);
         NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
@@ -147,6 +159,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 20;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v29 installed: overlay sublayer inside white layers");
+        CCGFLog(@"v30 installed: recolor + inflated tint clipped by parent radius");
     }
 }
