@@ -321,6 +321,23 @@ static void CCGFDidMoveWindow(id self, SEL sel) {
     gInHook = NO;
 }
 
+
+// 帧级全量: 每帧扫一遍 CC 窗口, 新出现的白层在渲染前被改掉
+static UIWindow *CCGFCCWindow(void);
+
+static void CCGFFramePass(void) {
+    if (gInHook || !gGlassDisabled || !gTargetColor) return;
+    UIWindow *w = CCGFCCWindow();
+    if (!w || w.hidden) return;
+    gInHook = YES;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    CCGFRecolorLayer(w.layer);
+    [CATransaction commit];
+    CCGFKillMaterials(w, 30);
+    gInHook = NO;
+}
+
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
@@ -395,6 +412,12 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
             }));
             CCGFLog(@"hooked UIView didMoveToWindow:");
         }
+        CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
+            @autoreleasepool { CCGFFramePass(); }
+        }] selector:@selector(main)];
+        dl.preferredFramesPerSecond = 0;   // 原生刷新率
+        [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
+
         NSTimer *t = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
@@ -404,6 +427,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v28 installed: instant hooks on didAddSubview/didMoveToWindow");
+        CCGFLog(@"v29 installed: native-Hz frame pass kills expand flash");
     }
 }
