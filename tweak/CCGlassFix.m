@@ -1,6 +1,6 @@
-// CCGlassFix v12 - 控制中心 + App资源库 + 主屏搜索 白底板 -> 深色(可配置)
-// v12: 主屏窗口不再等资源库出现, 每次 tick 全量扫(消除"需滑到资源库才生效"的延迟)
-//      + 诊断视觉特效图层(UIVisualEffectView)与带 contents 的大图层, 定位搜索胶囊
+// CCGlassFix v13 - 控制中心 / App资源库 / 主屏搜索 / 文件夹 白底 -> 深色(可配置)
+// v13: 白底其实是材质层(MTMaterialView / UIVisualEffectView), 直接把 effect 置空 + 铺深色
+//      并对所有材质层做逐帧看护, 消除打开文件夹时的白闪
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -113,6 +113,55 @@ static BOOL CCGFApplyColor(CALayer *l) {
     return YES;
 }
 
+// ---------- 材质层(白底的真正来源) ----------
+static NSHashTable *gEffects = nil;   // 已处理的 UIVisualEffectView(弱引用)
+
+// 该材质层是否属于需要变暗的区域(控制中心/资源库/主屏/文件夹)
+static BOOL CCGFViewInScope(UIView *v) {
+    int hops = 0;
+    for (UIView *cur = v; cur && hops < 12; cur = cur.superview, hops++) {
+        NSString *cn = NSStringFromClass([cur class]);
+        if (CCGFClassIsTarget(cn)) return YES;
+        if ([cur isKindOfClass:[UIWindow class]])
+            return [cn containsString:@"HomeScreen"] || [cn containsString:@"ControlCenter"]
+                || [cn containsString:@"SBControl"];
+    }
+    return NO;
+}
+
+// 把材质视图变成实心深色(去掉毛玻璃, 消除白色)
+static void CCGFKillEffect(UIVisualEffectView *ev) {
+    ev.effect = nil;
+    ev.backgroundColor = gTargetUIColor;
+    // 清掉残留的 backdrop / content 白层
+    for (UIView *s in ev.subviews) {
+        NSString *cn = NSStringFromClass([s class]);
+        if ([cn containsString:@"Backdrop"] || [cn containsString:@"VisualEffectContent"]) {
+            s.backgroundColor = [UIColor clearColor];
+        }
+    }
+    [gEffects addObject:ev];
+}
+
+static int CCGFScanEffects(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    int n = 0;
+    if ([v isKindOfClass:[UIVisualEffectView class]]) {
+        if (CCGFViewInScope(v) && v.effect != nil) { CCGFKillEffect((UIVisualEffectView *)v); n++; }
+    }
+    for (UIView *s in v.subviews) n += CCGFScanEffects(s, depth - 1);
+    return n;
+}
+
+// 逐帧看护材质层: 系统重新给 effect 就再置空
+static void CCGFWatchEffects(void) {
+    if (!gGlassDisabledCached || !gTargetUIColor) return;
+    NSArray *all = gEffects.allObjects;
+    for (UIVisualEffectView *ev in all) {
+        if (ev.effect != nil) { ev.effect = nil; ev.backgroundColor = gTargetUIColor; gWatchFixes++; }
+    }
+}
+
 // ---------- 巡查 ----------
 static int CCGFRecolor(CALayer *layer) {
     int changed = 0;
@@ -127,13 +176,15 @@ static void CCGFApplyToWindow(UIView *win, NSString *from) {
     [CATransaction setDisableActions:YES];
     int changed = CCGFRecolor(win.layer);
     [CATransaction commit];
-    if (changed > 0) {
-        gTotalRecolored += changed;
+    int eff = CCGFScanEffects(win, 40);   // 材质层(白色毛玻璃)一起去掉
+    if (changed + eff > 0) {
+        gTotalRecolored += changed + eff;
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLogTime > 1.0) {
             gLastLogTime = now;
-            CCGFLog([NSString stringWithFormat:@"%@: discovered %d (plates=%lu, watch=%d add=%d hook=%d)",
-                     from, changed, (unsigned long)gPlates.count, gWatchFixes, gAddFixes, gHookFixes]);
+            CCGFLog([NSString stringWithFormat:@"%@: plates=%d effects=%d (plates=%lu effs=%lu watch=%d add=%d hook=%d)",
+                     from, changed, eff, (unsigned long)gPlates.count, (unsigned long)gEffects.count,
+                     gWatchFixes, gAddFixes, gHookFixes]);
         }
     }
 }
@@ -324,6 +375,7 @@ static void CCGFHookWin(Class cls, SEL sel) {
 __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
         gPlates = [NSHashTable weakObjectsHashTable];
+        gEffects = [NSHashTable weakObjectsHashTable];
         CCGFLoadColor();
         CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f a=%.2f", getpid(), gGray, gAlpha]);
         Method m = class_getInstanceMethod([CALayer class], @selector(setBackgroundColor:));
@@ -360,7 +412,7 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
         CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            @autoreleasepool { CCGFWatchPlates(); }
+            @autoreleasepool { CCGFWatchPlates(); CCGFWatchEffects(); }
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
