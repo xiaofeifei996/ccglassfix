@@ -412,18 +412,12 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
             }));
             CCGFLog(@"hooked UIView didMoveToWindow:");
         }
-        CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            @autoreleasepool { CCGFFramePass(); }
-        }] selector:@selector(main)];
-        dl.preferredFramesPerSecond = 0;   // 原生刷新率
-        [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-
         NSTimer *t = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
         CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            @autoreleasepool { CCGFWatch(); }
+            @autoreleasepool { CCGFWatch(); CCGFFramePass(); }
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
