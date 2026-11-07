@@ -89,6 +89,50 @@ static BOOL CCGFViewInCC(UIView *v) {
     return NO;
 }
 
+
+static const void *kCCTintKey = &kCCTintKey;
+
+// 在白底视图最底层插一个深色子视图: 系统怎么刷 backgroundColor 都盖不住它,
+// 而模块图标/文字都是它的兄弟子视图, 仍在上面可见。
+static BOOL CCGFAddTintView(UIView *v) {
+    if (!gTargetUIColor || !v) return NO;
+    UIView *t = objc_getAssociatedObject(v, &kCCTintKey);
+    if (t && t.superview == v) {
+        if (!CGRectEqualToRect(t.frame, v.bounds)) t.frame = v.bounds;
+        return NO;
+    }
+    t = [[UIView alloc] initWithFrame:v.bounds];
+    t.backgroundColor = gTargetUIColor;
+    t.userInteractionEnabled = NO;
+    t.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [v insertSubview:t atIndex:0];
+    objc_setAssociatedObject(v, &kCCTintKey, t, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
+// 遍历 layer 树: 白色且够大的图层 -> 给它的宿主 view 插底 + 同时改色
+static int CCGFApplyTints(CALayer *l, int depth) {
+    if (depth > 26) return 0;
+    int n = 0;
+    for (CALayer *sub in l.sublayers) n += CCGFApplyTints(sub, depth + 1);
+    CGFloat w = l.frame.size.width, h = l.frame.size.height;
+    if (w * h < 900) return n;
+    BOOL white = CCGFNearWhite(l.backgroundColor);
+    if (!white) {
+        if ([l isKindOfClass:[CAShapeLayer class]]) white = CCGFNearWhite(((CAShapeLayer *)l).fillColor);
+    }
+    if (!white) return n;
+    id d = l.delegate;
+    if (!d || ![d isKindOfClass:[UIView class]]) return n;
+    UIView *v = (UIView *)d;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"Background"] || [cn containsString:@"Wallpaper"]) return n;
+    // 改色(顺带) + 插底(主手段)
+    if (CCGFNearWhite(l.backgroundColor)) l.backgroundColor = gTargetColor;
+    if (CCGFAddTintView(v)) { n++; [gPlates addObject:l]; }
+    return n;
+}
+
 // ---------- 改色 ----------
 static int CCGFRecolorLayer(CALayer *l) {
     int changed = 0;
@@ -152,10 +196,10 @@ static int CCGFKillMaterials(UIView *v, int depth) {
 
 static void CCGFApply(UIView *root) {
     if (!gGlassDisabled || !gTargetColor || !root) return;
-    if (!CCGFIsModuleView(NSStringFromClass([root class]))) return;  // 只改模块, 不动窗口背景
+    if (!CCGFIsModuleView(NSStringFromClass([root class]))) return;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    int n = CCGFRecolorLayer(root.layer);
+    int n = CCGFApplyTints(root.layer, 0);
     [CATransaction commit];
     n += CCGFKillMaterials(root, 30);
     if (n) gFixCount += n;
@@ -288,6 +332,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v27 installed: CC modules only, window background untouched");
+        CCGFLog(@"v28 installed: tint subview under white module bg");
     }
 }
