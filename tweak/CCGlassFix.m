@@ -1,5 +1,5 @@
 // CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
-// v18: 文件夹整屏背景保持不透明深色, 但关闭时完全不干预系统淡出动画
+// v19: 主屏只处理 Search/Folder/Library 子树, 上下文菜单恢复系统原样
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -83,16 +83,24 @@ static BOOL CCGFIsWallpaperClass(NSString *cn) {
     return [cn containsString:@"HomeScreenBackdrop"] || [cn containsString:@"Wallpaper"];
 }
 
+// 上下文菜单/编辑菜单: 一律不碰(保持系统原样)
+static BOOL CCGFIsMenuClass(NSString *cn) {
+    return [cn containsString:@"ContextMenu"] || [cn containsString:@"EditMenu"]
+        || [cn containsString:@"CalloutBar"] || [cn containsString:@"UIEditMenu"]
+        || [cn containsString:@"PlatterView"] || [cn containsString:@"MenuContainer"];
+}
+
 static BOOL CCGFMatInScope(UIView *v) {
     if (CCGFIsWallpaperClass(NSStringFromClass([v class]))) return NO;
     int hops = 0;
     for (UIView *cur = v; cur && hops < 14; cur = cur.superview, hops++) {
         NSString *cn = NSStringFromClass([cur class]);
         if (CCGFIsWallpaperClass(cn)) return NO;
-        if (CCGFClassIsTarget(cn)) return YES;
+        if (CCGFIsMenuClass(cn)) return NO;          // 菜单内部不动
+        if (CCGFClassIsTarget(cn)) return YES;       // Search / Folder / Library 子树
         if ([cur isKindOfClass:[UIWindow class]])
-            return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"]
-                || [cn containsString:@"HomeScreen"];
+            return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+        // 主屏窗口本身不算作用域: 必须靠上面的 Search/Folder/Library 命中
     }
     return NO;
 }
@@ -219,6 +227,28 @@ static int CCGFRecolor(CALayer *layer) {
     return changed;
 }
 
+static int CCGFScanMaterials(UIView *v, int depth);
+
+// 只在目标子树上改色(主屏窗口用)
+static int CCGFRecolorViewScoped(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    if (CCGFClassIsTarget(NSStringFromClass([v class]))) return CCGFRecolor(v.layer);
+    int n = 0;
+    for (UIView *s in v.subviews) n += CCGFRecolorViewScoped(s, depth - 1);
+    return n;
+}
+static int CCGFRecolorScoped(UIView *w) { return CCGFRecolorViewScoped(w, 10); }
+
+// 只在目标子树上处理材质
+static int CCGFScanMaterialsScoped(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    NSString *cn = NSStringFromClass([v class]);
+    if (CCGFClassIsTarget(cn)) return CCGFScanMaterials(v, depth);
+    int n = 0;
+    for (UIView *s in v.subviews) n += CCGFScanMaterialsScoped(s, depth - 1);
+    return n;
+}
+
 static void CCGFApplyToView(UIView *win) {
     if (!gGlassDisabledCached || !gTargetColor) return;
     [CATransaction begin];
@@ -237,8 +267,17 @@ static void CCGFTick(void) {
             if (w.hidden || w.alpha < 0.05) continue;
             NSString *cn = NSStringFromClass([w class]);
             BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
-            if (isCC || [cn containsString:@"Library"] || [cn containsString:@"HomeScreen"])
-                CCGFApplyToView(w);
+            if (isCC) { CCGFApplyToView(w); continue; }
+            if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
+            if ([cn containsString:@"HomeScreen"]) {
+                // 主屏: 只处理 Search/Folder/Library 子树, 不动菜单与其它材质
+                if (!gGlassDisabledCached || !gTargetColor) continue;
+                [CATransaction begin];
+                [CATransaction setDisableActions:YES];
+                CCGFRecolorScoped(w);
+                [CATransaction commit];
+                CCGFScanMaterialsScoped(w, 12);
+            }
         }
     }
 }
@@ -448,6 +487,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v18 installed: folder-bg opaque + non-interfering fade");
+        CCGFLog(@"v19 installed: scoped home scan, menus untouched");
     }
 }
