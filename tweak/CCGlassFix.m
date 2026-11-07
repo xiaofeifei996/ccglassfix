@@ -1,5 +1,6 @@
-// CCGlassFix v11 - 控制中心 + App资源库 + 主屏搜索 白底板 -> 深色(可配置)
-// v11: 支持 CAShapeLayer.fillColor; 目标容器内放宽面积门槛; 白色图层诊断日志
+// CCGlassFix v12 - 控制中心 + App资源库 + 主屏搜索 白底板 -> 深色(可配置)
+// v12: 主屏窗口不再等资源库出现, 每次 tick 全量扫(消除"需滑到资源库才生效"的延迟)
+//      + 诊断视觉特效图层(UIVisualEffectView)与带 contents 的大图层, 定位搜索胶囊
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -173,12 +174,27 @@ static NSString *CCGFChain(CALayer *l) {
 
 static int gDiagCount = 0;
 static void CCGFDiag(CALayer *layer, NSString *ctx) {
-    if (gDiagCount > 45) return;
+    if (gDiagCount > 60) return;
     for (CALayer *sub in layer.sublayers) CCGFDiag(sub, ctx);
     BOOL isFill = NO;
     CGColorRef c = CCGFWhiteColorOf(layer, &isFill);
-    if (!c) return;
     CGFloat w = layer.frame.size.width, h = layer.frame.size.height;
+    if (!c) {
+        // 非纯背景色: 记录视觉特效层(胶囊/材质)与带图内容的大图层
+        id d = layer.delegate;
+        NSString *dcn = d ? NSStringFromClass([d class]) : @"-";
+        if ([dcn containsString:@"VisualEffect"] || [dcn containsString:@"Backdrop"]
+            || [dcn containsString:@"Material"]) {
+            gDiagCount++;
+            CCGFLog([NSString stringWithFormat:@"DIAG %@ EFFECT dcn=%@ size=%.0fx%.0f r=%.0f chain=%@",
+                     ctx, dcn, w, h, layer.cornerRadius, CCGFChain(layer)]);
+        } else if (layer.contents && w * h > 8000) {
+            gDiagCount++;
+            CCGFLog([NSString stringWithFormat:@"DIAG %@ CONTENT dcn=%@ size=%.0fx%.0f r=%.0f chain=%@",
+                     ctx, dcn, w, h, layer.cornerRadius, CCGFChain(layer)]);
+        }
+        return;
+    }
     if (w * h < 400) return;
     gDiagCount++;
     CCGFLog([NSString stringWithFormat:@"DIAG %@ cls=%@ fill=%d size=%.0fx%.0f r=%.0f chain=%@",
@@ -199,18 +215,9 @@ static void CCGFTick(void) {
                 CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
                 continue;
             }
-            if ([cn containsString:@"HomeScreen"] && CCGFHasTarget(w, 8)) {
-                int changed = CCGFApplyToSubtrees(w, 8);
-                if (changed > 0) {
-                    gTotalRecolored += changed;
-                    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-                    if (now - gLastLogTime > 1.0) {
-                        gLastLogTime = now;
-                        CCGFLog([NSString stringWithFormat:@"tickHome: discovered %d (plates=%lu, watch=%d add=%d hook=%d)",
-                                 changed, (unsigned long)gPlates.count, gWatchFixes, gAddFixes, gHookFixes]);
-                    }
-                }
-                // 诊断: 前 3 次, 每次间隔 >12s
+            if ([cn containsString:@"HomeScreen"]) {
+                // 不再等资源库出现: 每次 tick 全量扫主屏窗口(与 v9 一致, 重启即生效)
+                CCGFApplyToWindow(w, @"tickHome");
                 NSTimeInterval now2 = [NSDate timeIntervalSinceReferenceDate];
                 if (gDumps < 3 && now2 - gLastDump > 12.0) {
                     gLastDump = now2; gDumps++;
