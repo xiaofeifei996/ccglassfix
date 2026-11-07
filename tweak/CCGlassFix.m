@@ -253,6 +253,8 @@ static int CCGFRecolor(CALayer *layer) {
 }
 
 static int CCGFScanMaterials(UIView *v, int depth);
+static NSString *CCGFChain(CALayer *l, int max);
+static void CCGFCCDiag(UIWindow *w);
 
 // 只在目标子树上改色(主屏窗口用)
 static int CCGFRecolorViewScoped(UIView *v, int depth) {
@@ -292,7 +294,7 @@ static void CCGFTick(void) {
             if (w.hidden || w.alpha < 0.05) continue;
             NSString *cn = NSStringFromClass([w class]);
             BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
-            if (isCC) { CCGFApplyToView(w); continue; }
+            if (isCC) { CCGFApplyToView(w); CCGFCCDiag(w); continue; }
             if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
             if ([cn containsString:@"HomeScreen"]) {
                 // 主屏: 只处理 Search/Folder/Library 子树, 不动菜单与其它材质
@@ -323,6 +325,49 @@ static void CCGFWatchPlates(void) {
 }
 
 // ---------------- 帧级录制 ----------------
+// ---------------- 控制中心白色图层诊断 ----------------
+static int gCCDumps = 0;
+static NSTimeInterval gCCLastDump = 0;
+static int gCCDiagCount = 0;
+
+static void CCGFCCDiagWalk(CALayer *l, double depth) {
+    if (gCCDiagCount > 55) return;
+    for (CALayer *sub in l.sublayers) CCGFCCDiagWalk(sub, depth + 1);
+    if (depth > 12) return;
+    BOOL white = CCGFColorIsWhite(l.backgroundColor);
+    CGColorRef fill = nil;
+    if ([l isKindOfClass:[CAShapeLayer class]]) fill = ((CAShapeLayer *)l).fillColor;
+    BOOL fillWhite = CCGFColorIsWhite(fill);
+    // 渐变层白色
+    BOOL gradWhite = NO;
+    if ([l isKindOfClass:[CAGradientLayer class]]) {
+        for (id c in ((CAGradientLayer *)l).colors) {
+            if (CFGetTypeID((__bridge CFTypeRef)c) == CGColorGetTypeID()
+                && CCGFColorIsWhite((__bridge CGColorRef)c)) { gradWhite = YES; break; }
+        }
+    }
+    BOOL hasContents = (l.contents != nil) && (l.contents != (id)[NSNull null]);
+    CGFloat w = l.frame.size.width, h = l.frame.size.height;
+    if (w * h < 800) return;
+    if (!(white || fillWhite || gradWhite) && !(hasContents && l.cornerRadius >= 10 && w*h > 3000)) return;
+    gCCDiagCount++;
+    id d = l.delegate;
+    CCGFLog([NSString stringWithFormat:@"CCDIAG cls=%@ dcn=%@ bgW=%d fillW=%d gradW=%d contents=%d size=%.0fx%.0f r=%.0f chain=%@",
+             NSStringFromClass([l class]),
+             d ? NSStringFromClass([d class]) : @"-",
+             (int)white, (int)fillWhite, (int)gradWhite, (int)hasContents,
+             w, h, l.cornerRadius, CCGFChain(l, 4)]);
+}
+
+static void CCGFCCDiag(UIWindow *w) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (gCCDumps >= 3 || now - gCCLastDump < 10.0) return;
+    gCCLastDump = now; gCCDumps++;
+    gCCDiagCount = 0;
+    CCGFCCDiagWalk(w.layer, 0);
+    CCGFLog([NSString stringWithFormat:@"CCDIAG end #%d count=%d", gCCDumps, gCCDiagCount]);
+}
+
 static NSString *CCGFChain(CALayer *l, int max) {
     NSMutableString *ms = [NSMutableString string];
     int hops = 0;
@@ -512,6 +557,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v21 installed: feather-blur headers cleared to transparent");
+        CCGFLog(@"v22 installed: + CC white-layer diagnostics");
     }
 }
