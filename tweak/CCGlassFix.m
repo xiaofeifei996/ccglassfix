@@ -1,20 +1,24 @@
-// CCGlassFix v29 - 仅控制中心: 在白色背景图层内部插入同形子层盖住白色
-// 原理: CALayer 的 sublayer 永远绘制在该层 backgroundColor 之上,
-//       所以系统无论怎么重绘白色背景, 都盖不住我们插入的子层。
-// 作用域: 仅 SBControlCenterWindow; 不碰窗口背景、不碰主屏/资源库/文件夹/菜单。
+// CCGlassFix v26 - 仅处理「控制中心」白色底 -> 深灰
+// 关键: 控制中心由 SwiftUI 渲染, 会在布局阶段把白色刷回; 单纯定时改色会慢一步/被覆盖。
+// 做法: ① hook 模块类(CCUI* / *Module*) 的 layoutSubviews, 布局一结束立刻压色(在渲染之前)
+//       ② 材质层(effect/backdrop)直接压掉
+//       ③ 0.2s 巡查 + 逐帧看护兜底
+// 作用域严格限制在 SBControlCenterWindow 内, 不影响主屏/文件夹/资源库/菜单。
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <objc/runtime.h>
 
 static NSString *const kLogPath = @"/var/tmp/ccglassfix.log";
-static NSString *const kTintName = @"CCGFTint";
 static CGFloat gGray = 0.13;
 static CGFloat gAlpha = 0.92;
 static CGColorRef gTargetColor = NULL;
+static UIColor *gTargetUIColor = nil;
 static BOOL gGlassDisabled = NO;
-static int gStamped = 0;
+static NSHashTable *gPlates = nil;
+static int gFixCount = 0;
 static NSTimeInterval gLastLog = 0;
+static NSUInteger gHookClassCount = 0;
 
 static void CCGFLog(NSString *msg) {
     @autoreleasepool {
@@ -44,9 +48,11 @@ static void CCGFLoadColor(void) {
         if (p[@"alpha"]) gAlpha = [p[@"alpha"] doubleValue];
         if (gTargetColor) CGColorRelease(gTargetColor);
         gTargetColor = CGColorCreateGenericGray(gGray, gAlpha);
+        gTargetUIColor = [UIColor colorWithCGColor:gTargetColor];
     }
 }
 
+// 近白判定(控制中心开启态填充偏浅灰, 阈值放宽)
 static BOOL CCGFNearWhite(CGColorRef c) {
     if (!c) return NO;
     size_t n = CGColorGetNumberOfComponents(c);
@@ -59,177 +65,229 @@ static BOOL CCGFNearWhite(CGColorRef c) {
     return r > 0.70 && g > 0.70 && b > 0.70 && a > 0.35;
 }
 
-static BOOL CCGFIsCCWindow(UIWindow *w) {
+// 模块视图: 只有这些才允许改色; 窗口背景/材质底板一律不动
+static BOOL CCGFIsModuleView(NSString *cn) {
+    if ([cn containsString:@"Background"] || [cn containsString:@"Backdrop"]
+        || [cn containsString:@"Wallpaper"] || [cn containsString:@"Window"]) return NO;
+    if ([cn containsString:@"ModuleView"] || [cn containsString:@"ButtonModule"]
+        || [cn containsString:@"SliderModule"] || [cn containsString:@"ToggleModule"]
+        || [cn containsString:@"ModuleContainer"] || [cn containsString:@"ContentModule"]
+        || [cn containsString:@"CCUIButton"] || [cn containsString:@"CCUIControl"]) return YES;
+    return NO;
+}
+
+static BOOL CCGFIsCCWindow(UIView *w) {
     NSString *cn = NSStringFromClass([w class]);
     return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
 }
 
-// 控制中心里出现搜索框 => 说明是"添加控制"页面, 整窗跳过
-static BOOL CCGFHasSearchBar(UIView *v, int depth) {
-    if (depth > 30 || !v) return NO;
-    NSString *cn = NSStringFromClass([v class]);
-    if ([cn containsString:@"SearchBar"] || [v isKindOfClass:[UITextField class]]
-        || [cn containsString:@"SearchTextField"] || [cn containsString:@"SearchControl"]) return YES;
-    for (UIView *sub in v.subviews) if (CCGFHasSearchBar(sub, depth + 1)) return YES;
+static BOOL CCGFViewInCC(UIView *v) {
+    int hops = 0;
+    for (UIView *cur = v; cur && hops < 24; cur = cur.superview, hops++) {
+        if ([cur isKindOfClass:[UIWindow class]]) return CCGFIsCCWindow(cur);
+    }
     return NO;
 }
 
-// 窗口背景/壁纸层不动
-static BOOL CCGFIsBgClass(NSString *cn) {
-    return [cn containsString:@"Background"] || [cn containsString:@"Backdrop"]
-        || [cn containsString:@"Wallpaper"] || [cn containsString:@"Window"];
-}
-
-// 核心: 在白色图层内插入同形子层
-static int CCGFStamp(CALayer *l, int depth) {
-    if (depth > 45 || !l) return 0;
-    int n = 0;
-    for (CALayer *sub in l.sublayers) n += CCGFStamp(sub, depth + 1);
-
-    if ([l.name isEqualToString:kTintName]) return n;
-    id d = l.delegate;
-    if (d && [d isKindOfClass:[UIView class]]) {
-        if (CCGFIsBgClass(NSStringFromClass([d class]))) return n;
-    }
-    // 已经盖过
-    for (CALayer *c in l.sublayers) if ([c.name isEqualToString:kTintName]) return n;
-
-    CGFloat w = l.bounds.size.width, h = l.bounds.size.height;
-    if (w < 8 || h < 8 || w * h < 900) return n;
-
-    BOOL white = CCGFNearWhite(l.backgroundColor);
-    if (!white) white = CCGFNearWhite(l.borderColor) ? NO : NO;  // 只用背景/fill 判定
-    if (!white && [l isKindOfClass:[CAShapeLayer class]])
-        white = CCGFNearWhite(((CAShapeLayer *)l).fillColor);
-    if (!white) return n;
-
-    // 圆角: 优先用图层自身; 否则按形状推断(圆形/胶囊)
-    CGFloat r = l.cornerRadius;
-    if (r <= 0.5) {
-        if (fabs(w - h) < 2.0) r = w / 2.0;
-        else if (h < w * 0.66) r = h / 2.0;
-    }
-    // 直接改色(最快见效, 也消掉白边本身的来源)
-    if (CCGFNearWhite(l.backgroundColor)) l.backgroundColor = gTargetColor;
-    if ([l isKindOfClass:[CAShapeLayer class]]
-        && CCGFNearWhite(((CAShapeLayer *)l).fillColor)) {
-        ((CAShapeLayer *)l).fillColor = gTargetColor;
-    }
-
-    // 再叠一层向外扩 2pt 的不透明深色, 由父层按原圆角裁掉 -> 抗锯齿白边被外部覆盖
-    CALayer *tint = [CALayer layer];
-    tint.name = kTintName;
-    tint.frame = CGRectInset(l.bounds, -2.0, -2.0);
-    tint.backgroundColor = gTargetColor;
-    tint.allowsEdgeAntialiasing = YES;
-    if (r > 0.5) {
-        // 父层裁剪: 与白色背景同一圆角轮廓, 不多不少
-        l.masksToBounds = YES;
-        l.allowsEdgeAntialiasing = YES;
-        if (l.cornerRadius <= 0.5) l.cornerRadius = r;
-        if (@available(iOS 13.0, *)) l.cornerCurve = kCACornerCurveContinuous;
-    }
-    [l insertSublayer:tint atIndex:0];   // 图标等原有子层仍在其上
-    gStamped++;
-    return n + 1;
-}
-
-
-// 一次性诊断: 列出控制中心里仍然发白的图层(宿主类名 + 尺寸 + 圆角)
-static int gDiagDone = 0;
-static int gDiagCount = 0;
-static void CCGFDiagWalk(CALayer *l, int depth) {
-    if (depth > 20 || !l || gDiagCount > 60) return;
-    for (CALayer *sub in l.sublayers) CCGFDiagWalk(sub, depth + 1);
+// ---------- 改色 ----------
+static int CCGFRecolorLayer(CALayer *l) {
+    int changed = 0;
+    for (CALayer *sub in l.sublayers) changed += CCGFRecolorLayer(sub);
     CGFloat w = l.frame.size.width, h = l.frame.size.height;
-    if (w * h < 900) return;
-    BOOL white = CCGFNearWhite(l.backgroundColor);
-    if (!white && [l isKindOfClass:[CAShapeLayer class]])
-        white = CCGFNearWhite(((CAShapeLayer *)l).fillColor);
-    if (!white) return;
-    if ([l.name isEqualToString:kTintName]) return;
-    id d = l.delegate;
-    const char *dcn = d ? object_getClassName(d) : "?";
-    gDiagCount++;
-    CCGFLog([NSString stringWithFormat:@"WHITE layer=%s host=%s %.0fx%.0f r=%.0f",
-             object_getClassName(l), dcn, w, h, l.cornerRadius]);
-}
-static void CCGFDiagOnce(UIWindow *w) {
-    if (gDiagDone >= 2) return;
-    gDiagDone++; gDiagCount = 0;
-    CCGFLog(@"=== WHITE diag start ===");
-    CCGFDiagWalk(w.layer, 0);
-    CCGFLog([NSString stringWithFormat:@"=== WHITE diag end count=%d ===", gDiagCount]);
-}
+    if (w * h < 400) return changed;
 
-// 尽量拿到全部窗口(iOS 26 里 app.windows 可能不含控制中心)
-static NSArray *CCGFAllWindows(void) {
-    UIApplication *app = [UIApplication sharedApplication];
-    NSMutableArray *out = [NSMutableArray array];
-    if (!app) return out;
-    @try {
-        if ([app respondsToSelector:NSSelectorFromString(@"_allWindows")]) {
-            NSArray *a = [app performSelector:NSSelectorFromString(@"_allWindows")];
-            if ([a isKindOfClass:[NSArray class]]) [out addObjectsFromArray:a];
+    BOOL did = NO;
+    if (CCGFNearWhite(l.backgroundColor)) { l.backgroundColor = gTargetColor; did = YES; }
+    if ([l isKindOfClass:[CAShapeLayer class]]) {
+        CGColorRef f = ((CAShapeLayer *)l).fillColor;
+        if (CCGFNearWhite(f)) { ((CAShapeLayer *)l).fillColor = gTargetColor; did = YES; }
+    }
+    if ([l isKindOfClass:[CAGradientLayer class]]) {
+        CAGradientLayer *g = (CAGradientLayer *)l;
+        NSArray *cols = g.colors;
+        BOOL anyWhite = NO;
+        for (id c in cols) {
+            if (CFGetTypeID((__bridge CFTypeRef)c) == CGColorGetTypeID()
+                && CCGFNearWhite((__bridge CGColorRef)c)) { anyWhite = YES; break; }
         }
-    } @catch(...) {}
-    @try { [out addObjectsFromArray:app.windows]; } @catch(...) {}
-    @try {
-        Class sbm = NSClassFromString(@"SBWindowScene");
-        if (sbm) {}
-    } @catch(...) {}
-    return out;
+        if (anyWhite && cols.count) {
+            NSMutableArray *nw = [NSMutableArray arrayWithCapacity:cols.count];
+            for (NSUInteger i = 0; i < cols.count; i++) [nw addObject:(__bridge id)gTargetColor];
+            g.colors = nw; did = YES;
+        }
+    }
+    if (did) { [gPlates addObject:l]; changed++; }
+    return changed;
 }
 
+// 材质层: 去掉毛玻璃并铺深色
+static int CCGFKillMaterials(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    int n = 0;
+    NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"Background"] || [cn containsString:@"Wallpaper"]) {
+        for (UIView *s in v.subviews) n += CCGFKillMaterials(s, depth - 1);
+        return n;
+    }
+    BOOL isMat = [cn containsString:@"Material"] || [cn containsString:@"VisualEffect"]
+              || [cn containsString:@"Backdrop"];
+    if (isMat) {
+        if ([v isKindOfClass:[UIVisualEffectView class]]) {
+            UIVisualEffectView *ev = (UIVisualEffectView *)v;
+            if (ev.effect != nil) { ev.effect = nil; n++; }
+        }
+        for (UIView *s in v.subviews) {
+            NSString *scn = NSStringFromClass([s class]);
+            if ([scn containsString:@"Material"] || [scn containsString:@"Backdrop"]
+                || [scn containsString:@"VisualEffect"] || [scn containsString:@"ContentView"]) {
+                if (!s.hidden) { s.hidden = YES; n++; }
+            }
+        }
+        if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; n++; }
+        return n;   // 材质内部不再下钻
+    }
+    for (UIView *s in v.subviews) n += CCGFKillMaterials(s, depth - 1);
+    return n;
+}
+
+static void CCGFApply(UIView *root) {
+    if (!gGlassDisabled || !gTargetColor || !root) return;
+    if (!CCGFIsModuleView(NSStringFromClass([root class]))) return;  // 只改模块, 不动窗口背景
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    int n = CCGFRecolorLayer(root.layer);
+    [CATransaction commit];
+    n += CCGFKillMaterials(root, 30);
+    if (n) gFixCount += n;
+}
+
+static void CCGFApply(UIView *root);
+
+// ---------- 定位控制中心窗口 ----------
+static UIWindow *CCGFCCWindow(void) {
+    UIApplication *app = [UIApplication sharedApplication];
+    if (!app) return nil;
+    for (UIWindow *w in app.windows) {
+        if (w.hidden || w.alpha < 0.05) continue;
+        if (CCGFIsCCWindow(w)) return w;
+    }
+    return nil;
+}
+
+// ---------- hook: layoutSubviews(仅控制中心模块类自己实现的) ----------
+typedef void (*LayoutIMP)(id, SEL);
+static BOOL gInLayout = NO;
+
+static void CCGFFixNow(UIView *v) {
+    if (gInLayout) return;
+    gInLayout = YES;
+    CCGFApply(v);
+    gInLayout = NO;
+}
+
+static BOOL CCGFClassLooksCC(NSString *cn) {
+    return [cn containsString:@"CCUI"] || [cn containsString:@"Module"]
+        || [cn containsString:@"ControlCenter"];
+}
+
+static int gHookClassCount2 = 0;
+
+static void CCGFInstallLayoutHooks(void) {
+    int total = objc_getClassList(NULL, 0);
+    if (total <= 0) return;
+    Class *classes = (Class *)malloc(sizeof(Class) * total);
+    if (!classes) return;
+    total = objc_getClassList(classes, total);
+    for (int i = 0; i < total; i++) {
+        Class cls = classes[i];
+        NSString *cn = NSStringFromClass(cls);
+        if (!CCGFClassLooksCC(cn)) continue;
+        if (![cls isSubclassOfClass:[UIView class]]) continue;
+        // 必须是该类自己实现的 layoutSubviews(避免改到父类共享的 Method)
+        unsigned int mc = 0;
+        Method *methods = class_copyMethodList(cls, &mc);
+        if (!methods) continue;
+        Method target = NULL;
+        for (unsigned int k = 0; k < mc; k++) {
+            if (method_getName(methods[k]) == @selector(layoutSubviews)) { target = methods[k]; break; }
+        }
+        if (target) {
+            LayoutIMP orig = (LayoutIMP)method_getImplementation(target);
+            method_setImplementation(target, imp_implementationWithBlock(^void(id self){
+                orig(self, @selector(layoutSubviews));
+                if (!gGlassDisabled || !gTargetColor) return;
+                if (![self isKindOfClass:[UIView class]]) return;
+                UIView *v = (UIView *)self;
+                if (!v.window || !CCGFIsCCWindow(v.window)) return;
+                CCGFFixNow(v);
+            }));
+            gHookClassCount2++;
+        }
+        free(methods);
+    }
+    free(classes);
+    gHookClassCount = (NSUInteger)gHookClassCount2;
+}
+
+// 遍历控制中心里的模块视图
+static int gModCount = 0;
+static void CCGETCMods(UIView *v, int depth) {
+    if (depth > 22 || !v) return;
+    if (CCGFIsModuleView(NSStringFromClass([v class]))) {
+        gModCount++;
+        CCGFApply(v);
+        return;   // 模块内部一次处理完, 不再下钻
+    }
+    for (UIView *s in v.subviews) CCGETCMods(s, depth + 1);
+}
+
+// ---------- 巡查 ----------
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
-        if (!gGlassDisabled || !gTargetColor) return;
-        NSArray *wins = CCGFAllWindows();
-        if (wins.count == 0) return;
-        {
-        for (UIWindow *w in wins) {
-            if (![w isKindOfClass:[UIWindow class]]) continue;
-            if (w.hidden || w.alpha < 0.05 || !CCGFIsCCWindow(w)) continue;
-            [CATransaction begin];
-            [CATransaction setDisableActions:YES];
-            CCGFStamp(w.layer, 0);
-            [CATransaction commit];
-            if (gDiagDone < 2) CCGFDiagOnce(w);
-        }
-        }
+        UIWindow *w = CCGFCCWindow();
+        if (!w) return;
+        CCGETCMods(w, 0);
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
-        if (now - gLastLog > 5.0) {
+        if (now - gLastLog > 3.0) {
             gLastLog = now;
-            CCGFLog([NSString stringWithFormat:@"tick stamped=%d", gStamped]);
+            CCGFLog([NSString stringWithFormat:@"tick fixes=%d plates=%lu hooks=%lu",
+                     gFixCount, (unsigned long)gPlates.count, (unsigned long)gHookClassCount]);
         }
     }
+}
+
+static void CCGFWatch(void) {
+    if (!gGlassDisabled || !gTargetColor || gPlates.count == 0) return;
+    [CATransaction begin];
+    [CATransaction setDisableActions:YES];
+    for (CALayer *l in gPlates.allObjects) {
+        if (CCGFNearWhite(l.backgroundColor)) l.backgroundColor = gTargetColor;
+        if ([l isKindOfClass:[CAShapeLayer class]]) {
+            CGColorRef f = ((CAShapeLayer *)l).fillColor;
+            if (CCGFNearWhite(f)) ((CAShapeLayer *)l).fillColor = gTargetColor;
+        }
+    }
+    [CATransaction commit];
 }
 
 __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
+        gPlates = [NSHashTable weakObjectsHashTable];
         CCGFLoadColor();
         gGlassDisabled = CCGFGlassOff();
-        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f v33", getpid(), gGray]);
-        NSTimer *t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm){
+        CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f CC-only", getpid(), gGray]);
+        CCGFInstallLayoutHooks();
+        CCGFLog([NSString stringWithFormat:@"layout hooks installed on %lu classes", (unsigned long)gHookClassCount]);
+        NSTimer *t = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
         CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            @autoreleasepool { CCGFTick(); }
+            @autoreleasepool { CCGFWatch(); }
         }] selector:@selector(main)];
-        dl.preferredFramesPerSecond = 20;
+        dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v33 installed: process all CC pages incl. add-controls");
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
-            @autoreleasepool {
-                NSMutableString *ms = [NSMutableString stringWithString:@"WINS:"];
-                for (UIWindow *w in CCGFAllWindows()) {
-                    if (![w isKindOfClass:[UIWindow class]]) continue;
-                    [ms appendFormat:@" %s(%d)", object_getClassName(w), (int)w.hidden];
-                }
-                CCGFLog(ms);
-            }
-        });
+        CCGFLog(@"v27 installed: CC modules only, window background untouched");
     }
 }
