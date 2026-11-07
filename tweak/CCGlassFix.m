@@ -70,7 +70,7 @@ static BOOL CCGFLayerShapeOK(CALayer *layer) {
     return layer.cornerRadius >= 15.0 || area > 40000.0;
 }
 
-// 沿 superlayer 链判断该图层是否处于 控制中心 / App资源库 容器内
+// 沿 superlayer 链判断该图层是否处于 控制中心 / App资源库 / 搜索 容器内
 static BOOL CCGFLayerInTarget(CALayer *layer) {
     int hops = 0;
     for (CALayer *cur = layer; cur && hops < 80; cur = cur.superlayer, hops++) {
@@ -78,6 +78,7 @@ static BOOL CCGFLayerInTarget(CALayer *layer) {
         if (d && [d isKindOfClass:[UIView class]]) {
             NSString *cn = NSStringFromClass([d class]);
             if ([cn containsString:@"Library"] || [cn containsString:@"AppLibrary"]) return YES;
+            if ([cn containsString:@"Search"]) return YES;
             if ([d isKindOfClass:[UIWindow class]]) {
                 return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
             }
@@ -115,12 +116,32 @@ static void CCGFApplyToWindow(UIView *win, NSString *from) {
     }
 }
 
-static BOOL CCGFHasLibrary(UIView *v, int depth) {
-    if (depth <= 0) return NO;
+static BOOL CCGFClassIsTarget(NSString *cn) {
+    return [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"]
+        || [cn containsString:@"Search"];
+}
+
+// 深度受限查找目标子树并逐棵改色
+static int CCGFApplyToSubtrees(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
     NSString *cn = NSStringFromClass([v class]);
-    if ([cn containsString:@"Library"]) return YES;
+    if (CCGFClassIsTarget(cn)) {
+        [CATransaction begin];
+        [CATransaction setDisableActions:YES];
+        int changed = CCGFRecolor(v.layer, gTargetColor);
+        [CATransaction commit];
+        return changed;  // 子树已全覆盖, 不再下钻
+    }
+    int total = 0;
+    for (UIView *s in v.subviews) total += CCGFApplyToSubtrees(s, depth - 1);
+    return total;
+}
+
+static BOOL CCGFHasTarget(UIView *v, int depth) {
+    if (depth <= 0 || !v) return NO;
+    if (CCGFClassIsTarget(NSStringFromClass([v class]))) return YES;
     for (UIView *s in v.subviews)
-        if (CCGFHasLibrary(s, depth - 1)) return YES;
+        if (CCGFHasTarget(s, depth - 1)) return YES;
     return NO;
 }
 
@@ -134,11 +155,23 @@ static void CCGFTick(void) {
             NSString *cn = NSStringFromClass([w class]);
             BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
             BOOL isLib = [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"];
-            if (!isCC && !isLib) {
-                if (![cn containsString:@"HomeScreen"]) continue;
-                if (!CCGFHasLibrary(w, 7)) continue;
+            if (isCC || isLib) {
+                CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
+                continue;
             }
-            CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
+            // 主屏窗口: 只改 Library/Search 子树, 不碰小组件等其它白色元素
+            if ([cn containsString:@"HomeScreen"] && CCGFHasTarget(w, 8)) {
+                int changed = CCGFApplyToSubtrees(w, 8);
+                if (changed > 0) {
+                    gTotalRecolored += changed;
+                    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+                    if (now - gLastLogTime > 1.0) {
+                        gLastLogTime = now;
+                        CCGFLog([NSString stringWithFormat:@"tickHome: discovered %d (plates=%lu, watch=%d add=%d hook=%d)",
+                                 changed, (unsigned long)gPlates.count, gWatchFixes, gAddFixes, gHookFixes]);
+                    }
+                }
+            }
         }
     }
 }
