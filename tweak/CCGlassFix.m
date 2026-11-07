@@ -134,6 +134,34 @@ static int CCGFStamp(CALayer *l, int depth) {
     return n + 1;
 }
 
+
+// 一次性诊断: 列出控制中心里仍然发白的图层(宿主类名 + 尺寸 + 圆角)
+static int gDiagDone = 0;
+static int gDiagCount = 0;
+static void CCGFDiagWalk(CALayer *l, int depth) {
+    if (depth > 20 || !l || gDiagCount > 60) return;
+    for (CALayer *sub in l.sublayers) CCGFDiagWalk(sub, depth + 1);
+    CGFloat w = l.frame.size.width, h = l.frame.size.height;
+    if (w * h < 900) return;
+    BOOL white = CCGFNearWhite(l.backgroundColor);
+    if (!white && [l isKindOfClass:[CAShapeLayer class]])
+        white = CCGFNearWhite(((CAShapeLayer *)l).fillColor);
+    if (!white) return;
+    if ([l.name isEqualToString:kTintName]) return;
+    id d = l.delegate;
+    const char *dcn = d ? object_getClassName(d) : "?";
+    gDiagCount++;
+    CCGFLog([NSString stringWithFormat:@"WHITE layer=%s host=%s %.0fx%.0f r=%.0f",
+             object_getClassName(l), dcn, w, h, l.cornerRadius]);
+}
+static void CCGFDiagOnce(UIWindow *w) {
+    if (gDiagDone >= 2) return;
+    gDiagDone++; gDiagCount = 0;
+    CCGFLog(@"=== WHITE diag start ===");
+    CCGFDiagWalk(w.layer, 0);
+    CCGFLog([NSString stringWithFormat:@"=== WHITE diag end count=%d ===", gDiagCount]);
+}
+
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
@@ -146,6 +174,7 @@ static void CCGFTick(void) {
             [CATransaction setDisableActions:YES];
             CCGFStamp(w.layer, 0);
             [CATransaction commit];
+            if (gDiagDone < 2) CCGFDiagOnce(w);
         }
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLog > 5.0) {
