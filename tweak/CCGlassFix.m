@@ -296,6 +296,67 @@ static int CCGFRecolor(CALayer *layer) {
 }
 
 static int CCGFScanMaterials(UIView *v, int depth);
+static void CCGFCCViewDump(UIWindow *w);
+
+static const void *kCCTintKey = &kCCTintKey;
+
+static BOOL CCGFInCCWindow(UIView *v) {
+    int hops = 0;
+    for (UIView *cur = v; cur && hops < 20; cur = cur.superview, hops++) {
+        if ([cur isKindOfClass:[UIWindow class]]) {
+            NSString *cn = NSStringFromClass([cur class]);
+            return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+        }
+    }
+    return NO;
+}
+
+// 在材质之上、内容之下插入自绘深色底 —— 系统重绘颜色换不掉它
+static BOOL CCGFAddCCTint(UIView *v) {
+    if (!gTargetUIColor) return NO;
+    UIView *tint = objc_getAssociatedObject(v, &kCCTintKey);
+    if (tint && tint.superview == v) return NO;
+    // 跳过内部已有 material 子视图之后的层级, 让内容仍然可见
+    NSUInteger idx = 0;
+    for (NSUInteger i = 0; i < v.subviews.count; i++) {
+        NSString *scn = NSStringFromClass([v.subviews[i] class]);
+        if (CCGFIsMaterialClass(scn) || [scn containsString:@"Backdrop"]
+            || [scn containsString:@"ContentView"]) idx = i + 1; else break;
+    }
+    tint = [[UIView alloc] initWithFrame:v.bounds];
+    tint.backgroundColor = gTargetUIColor;
+    tint.userInteractionEnabled = NO;
+    tint.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    if (idx > v.subviews.count) idx = v.subviews.count;
+    [v insertSubview:tint atIndex:idx];
+    objc_setAssociatedObject(v, &kCCTintKey, tint, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    return YES;
+}
+
+// 视图类名清单(控制中心)
+static int gVCDumps = 0;
+static NSTimeInterval gVCLast = 0;
+static int gVCCount = 0;
+static void CCGFViewDump(UIView *v, int depth) {
+    if (gVCCount > 90) return;
+    CGFloat w = v.bounds.size.width, h = v.bounds.size.height;
+    NSString *cn = NSStringFromClass([v class]);
+    BOOL bg = v.backgroundColor && v.backgroundColor != [UIColor clearColor];
+    if (w * h >= 900) {
+        gVCCount++;
+        CCGFLog([NSString stringWithFormat:@"VDUMP d=%d %@ %.0fx%.0f bg=%@ alpha=%.2f",
+                 depth, cn, w, h, bg ? [NSString stringWithFormat:@"%.0f%%", v.backgroundColor.CGColor ? 100.0 : 0.0] : @"-", v.alpha]);
+    }
+    if (depth >= 6) return;
+    for (UIView *s in v.subviews) CCGFViewDump(s, depth + 1);
+}
+static void CCGFCCViewDump(UIWindow *w) {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (gVCDumps >= 2 || now - gVCLast < 12.0) return;
+    gVCLast = now; gVCDumps++; gVCCount = 0;
+    CCGFViewDump(w, 0);
+    CCGFLog([NSString stringWithFormat:@"VDUMP end #%d count=%d", gVCDumps, gVCCount]);
+}
 static int CCGFCCStrongRecolor(CALayer *l);
 static NSString *CCGFChain(CALayer *l, int max);
 static void CCGFCCDiag(UIWindow *w);
@@ -350,6 +411,7 @@ static void CCGFTick(void) {
                              strong, (unsigned long)gPlates.count, (unsigned long)gMats.count, gMatFixes]);
                 }
                 CCGFCCDiag(w);
+                CCGFCCViewDump(w);
                 continue;
             }
             if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
@@ -614,6 +676,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v24 installed: CC strong recolor + CC diag enabled");
+        CCGFLog(@"v25 installed: CC tint subview + view dump");
     }
 }
