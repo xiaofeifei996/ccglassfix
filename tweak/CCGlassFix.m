@@ -341,8 +341,15 @@ static void CCGFTick(void) {
             if (isCC) {
                 CCGFApplyToView(w);
                 [CATransaction begin]; [CATransaction setDisableActions:YES];
-                CCGFCCStrongRecolor(w.layer);
+                int strong = CCGFCCStrongRecolor(w.layer);
                 [CATransaction commit];
+                NSTimeInterval n1 = [NSDate timeIntervalSinceReferenceDate];
+                if (n1 - gLastLogTime > 2.0) {
+                    gLastLogTime = n1;
+                    CCGFLog([NSString stringWithFormat:@"CC strong=%d plates=%lu mats=%lu matFix=%d",
+                             strong, (unsigned long)gPlates.count, (unsigned long)gMats.count, gMatFixes]);
+                }
+                CCGFCCDiag(w);
                 continue;
             }
             if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
@@ -607,6 +614,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v23 installed: CC strong recolor (on-state white pills)");
+        CCGFLog(@"v24 installed: CC strong recolor + CC diag enabled");
     }
 }
