@@ -1,5 +1,5 @@
 // CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
-// v16: 定位到文件夹外面白闪来自 SBFolderControllerBackgroundView 整屏材质 -> 打开前预热压色
+// v17: 文件夹整屏材质改为透明隐藏(不铺色), 消除关闭时的延迟残影
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -104,18 +104,29 @@ static BOOL CCGFFixMaterialView(UIView *v) {
     if (!CCGFIsMaterialClass(vcn) && !isFolderBg) return NO;
     if (!CCGFMatInScope(v)) return NO;
     BOOL did = NO;
+    // 文件夹外面那层整屏材质: 直接透明化(不铺色), 关文件夹时不会留下残影
+    if (isFolderBg) {
+        if ([v isKindOfClass:[UIVisualEffectView class]] && ((UIVisualEffectView *)v).effect != nil) {
+            ((UIVisualEffectView *)v).effect = nil; did = YES;
+        }
+        for (UIView *s in v.subviews) {
+            if (s.backgroundColor != [UIColor clearColor]) { s.backgroundColor = [UIColor clearColor]; did = YES; }
+            if (!s.hidden) { s.hidden = YES; did = YES; }
+        }
+        if (v.backgroundColor != [UIColor clearColor]) { v.backgroundColor = [UIColor clearColor]; did = YES; }
+        if (v.layer.backgroundColor != NULL) { v.layer.backgroundColor = NULL; did = YES; }
+        if (!v.hidden) { v.hidden = YES; did = YES; }
+        if (did) gMatFixes++;
+        [gMats addObject:v];
+        return did;
+    }
     if ([v isKindOfClass:[UIVisualEffectView class]]) {
         UIVisualEffectView *ev = (UIVisualEffectView *)v;
         if (ev.effect != nil) { ev.effect = nil; did = YES; }
     }
-    // 文件夹整屏背景: 立刻铺深色, 不让它的材质在动画里先亮一帧
-    if (isFolderBg) {
-        if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
-        if (v.layer.backgroundColor != gTargetColor) { v.layer.backgroundColor = gTargetColor; did = YES; }
-    }
     for (UIView *s in v.subviews) {
         NSString *scn = NSStringFromClass([s class]);
-        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"] || isFolderBg) {
+        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"]) {
             s.backgroundColor = [UIColor clearColor];
             if (!s.hidden) { s.hidden = YES; did = YES; }
         }
@@ -138,6 +149,12 @@ static int CCGFScanMaterials(UIView *v, int depth) {
 static void CCGFWatchMaterials(void) {
     if (!gGlassDisabledCached || !gTargetUIColor || gMats.count == 0) return;
     for (UIView *v in gMats.allObjects) {
+        if (CCGFIsFolderBgClass(NSStringFromClass([v class]))) {
+            if (!v.hidden || v.layer.backgroundColor != NULL) {
+                if (CCGFFixMaterialView(v)) gWatchFixes++;
+            }
+            continue;
+        }
         if ([v isKindOfClass:[UIVisualEffectView class]]) {
             if (((UIVisualEffectView *)v).effect != nil) {
                 ((UIVisualEffectView *)v).effect = nil;
@@ -422,6 +439,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v16 installed: folder-bg killer + prewarm + frame recorder");
+        CCGFLog(@"v17 installed: folder-bg transparent-hide");
     }
 }
