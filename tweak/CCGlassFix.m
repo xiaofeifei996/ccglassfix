@@ -1,5 +1,5 @@
 // CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
-// v17: 文件夹整屏材质改为透明隐藏(不铺色), 消除关闭时的延迟残影
+// v18: 文件夹整屏背景保持不透明深色, 但关闭时完全不干预系统淡出动画
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -104,18 +104,25 @@ static BOOL CCGFFixMaterialView(UIView *v) {
     if (!CCGFIsMaterialClass(vcn) && !isFolderBg) return NO;
     if (!CCGFMatInScope(v)) return NO;
     BOOL did = NO;
-    // 文件夹外面那层整屏材质: 直接透明化(不铺色), 关文件夹时不会留下残影
+    // 文件夹外面那层整屏背景: 铺不透明深色(不做透明), 但绝不干预它自身的显示/隐藏,
+    // 这样系统关闭文件夹时的淡出动画能照常走完, 不会出现"背景延迟关闭"
     if (isFolderBg) {
         if ([v isKindOfClass:[UIVisualEffectView class]] && ((UIVisualEffectView *)v).effect != nil) {
             ((UIVisualEffectView *)v).effect = nil; did = YES;
         }
+        // 只压掉内部材质/backdrop 子层, 其它子层一律不动(否则关闭动画不同步)
         for (UIView *s in v.subviews) {
-            if (s.backgroundColor != [UIColor clearColor]) { s.backgroundColor = [UIColor clearColor]; did = YES; }
-            if (!s.hidden) { s.hidden = YES; did = YES; }
+            NSString *scn = NSStringFromClass([s class]);
+            if (CCGFIsMaterialClass(scn)) {
+                s.backgroundColor = [UIColor clearColor];
+                if (!s.hidden) { s.hidden = YES; did = YES; }
+            }
         }
-        if (v.backgroundColor != [UIColor clearColor]) { v.backgroundColor = [UIColor clearColor]; did = YES; }
-        if (v.layer.backgroundColor != NULL) { v.layer.backgroundColor = NULL; did = YES; }
-        if (!v.hidden) { v.hidden = YES; did = YES; }
+        // 仅在它完整可见(未处于淡出)时铺色, 淡出过程中放手
+        if (v.alpha > 0.98) {
+            if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
+            if (v.layer.backgroundColor != gTargetColor) { v.layer.backgroundColor = gTargetColor; did = YES; }
+        }
         if (did) gMatFixes++;
         [gMats addObject:v];
         return did;
@@ -150,7 +157,9 @@ static void CCGFWatchMaterials(void) {
     if (!gGlassDisabledCached || !gTargetUIColor || gMats.count == 0) return;
     for (UIView *v in gMats.allObjects) {
         if (CCGFIsFolderBgClass(NSStringFromClass([v class]))) {
-            if (!v.hidden || v.layer.backgroundColor != NULL) {
+            // 关闭动画进行中(alpha 下降)就完全放手
+            if (v.alpha <= 0.98) continue;
+            if (v.backgroundColor != gTargetUIColor) {
                 if (CCGFFixMaterialView(v)) gWatchFixes++;
             }
             continue;
@@ -439,6 +448,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v17 installed: folder-bg transparent-hide");
+        CCGFLog(@"v18 installed: folder-bg opaque + non-interfering fade");
     }
 }
