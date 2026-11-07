@@ -1,5 +1,5 @@
-// CCGlassFix v15 - 材质层压暗 + 文件夹白闪帧级录制
-// 目标: 打开 App 文件夹的白色闪一下 -> 先精确抓到那几帧到底是哪个类画的
+// CCGlassFix v16 - 材质层压暗 + 文件夹整屏背景(SBFolderControllerBackgroundView)直接压深色
+// v16: 定位到文件夹外面白闪来自 SBFolderControllerBackgroundView 整屏材质 -> 打开前预热压色
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -69,6 +69,12 @@ static BOOL CCGFClassIsTarget(NSString *cn) {
     return [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"]
         || [cn containsString:@"Search"] || [cn containsString:@"Folder"];
 }
+
+// 文件夹外面那层整屏材质(SBFolderControllerBackgroundView) - 白闪主犯
+static BOOL CCGFIsFolderBgClass(NSString *cn) {
+    return [cn containsString:@"SBFolderControllerBackground"]
+        || [cn containsString:@"FolderControllerBackground"];
+}
 static BOOL CCGFIsMaterialClass(NSString *cn) {
     return [cn containsString:@"VisualEffect"] || [cn containsString:@"Material"]
         || [cn containsString:@"Backdrop"];
@@ -93,16 +99,23 @@ static BOOL CCGFMatInScope(UIView *v) {
 
 static BOOL CCGFFixMaterialView(UIView *v) {
     if (!gTargetUIColor) return NO;
-    if (!CCGFIsMaterialClass(NSStringFromClass([v class]))) return NO;
+    NSString *vcn = NSStringFromClass([v class]);
+    BOOL isFolderBg = CCGFIsFolderBgClass(vcn);
+    if (!CCGFIsMaterialClass(vcn) && !isFolderBg) return NO;
     if (!CCGFMatInScope(v)) return NO;
     BOOL did = NO;
     if ([v isKindOfClass:[UIVisualEffectView class]]) {
         UIVisualEffectView *ev = (UIVisualEffectView *)v;
         if (ev.effect != nil) { ev.effect = nil; did = YES; }
     }
+    // 文件夹整屏背景: 立刻铺深色, 不让它的材质在动画里先亮一帧
+    if (isFolderBg) {
+        if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
+        if (v.layer.backgroundColor != gTargetColor) { v.layer.backgroundColor = gTargetColor; did = YES; }
+    }
     for (UIView *s in v.subviews) {
         NSString *scn = NSStringFromClass([s class]);
-        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"]) {
+        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"] || isFolderBg) {
             s.backgroundColor = [UIColor clearColor];
             if (!s.hidden) { s.hidden = YES; did = YES; }
         }
@@ -116,7 +129,8 @@ static BOOL CCGFFixMaterialView(UIView *v) {
 static int CCGFScanMaterials(UIView *v, int depth) {
     if (depth <= 0 || !v) return 0;
     int n = 0;
-    if (CCGFIsMaterialClass(NSStringFromClass([v class]))) { if (CCGFFixMaterialView(v)) n++; }
+    NSString *cn = NSStringFromClass([v class]);
+    if (CCGFIsMaterialClass(cn) || CCGFIsFolderBgClass(cn)) { if (CCGFFixMaterialView(v)) n++; }
     for (UIView *s in v.subviews) n += CCGFScanMaterials(s, depth - 1);
     return n;
 }
@@ -315,7 +329,8 @@ static void CCGFAddSublayer(id self, SEL sel, CALayer *sub) {
     id d = sub.delegate;
     if (d && [d isKindOfClass:[UIView class]]) {
         UIView *dv = (UIView *)d;
-        if (CCGFIsMaterialClass(NSStringFromClass([dv class]))) { if (CCGFFixMaterialView(dv)) gAddFixes++; return; }
+        NSString *dcn2 = NSStringFromClass([dv class]);
+        if (CCGFIsMaterialClass(dcn2) || CCGFIsFolderBgClass(dcn2)) { if (CCGFFixMaterialView(dv)) gAddFixes++; return; }
         UIView *parent = dv.superview;
         if (parent && CCGFIsMaterialClass(NSStringFromClass([parent class])) && CCGFMatInScope(parent)) {
             dv.hidden = YES; gAddFixes++; return;
@@ -339,8 +354,19 @@ static void CCGFDidMoveToWindow(id self, SEL sel) {
     NSString *cn = NSStringFromClass([v class]);
     if ([cn containsString:@"Folder"] && ![cn containsString:@"Icon"] && ![cn containsString:@"Image"]) {
         CCGFStartRec(cn);
+        // 动画开始前预热: 把整棵树的材质/底板先压成深色
+        if (gTargetUIColor) {
+            UIWindow *w = v.window;
+            if (w) {
+                [CATransaction begin]; [CATransaction setDisableActions:YES];
+                CCGFRecolor(w.layer);
+                [CATransaction commit];
+                CCGFScanMaterials(w, 40);
+            }
+        }
     }
-    if (gTargetUIColor && gGlassDisabledCached && CCGFIsMaterialClass(cn)) {
+    if (gTargetUIColor && gGlassDisabledCached
+        && (CCGFIsMaterialClass(cn) || CCGFIsFolderBgClass(cn))) {
         if (CCGFFixMaterialView(v)) gAddFixes++;
     }
 }
@@ -396,6 +422,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v15 installed: mat killer + didMove + frame recorder");
+        CCGFLog(@"v16 installed: folder-bg killer + prewarm + frame recorder");
     }
 }
