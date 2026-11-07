@@ -65,6 +65,17 @@ static BOOL CCGFNearWhite(CGColorRef c) {
     return r > 0.70 && g > 0.70 && b > 0.70 && a > 0.35;
 }
 
+// 模块视图: 只有这些才允许改色; 窗口背景/材质底板一律不动
+static BOOL CCGFIsModuleView(NSString *cn) {
+    if ([cn containsString:@"Background"] || [cn containsString:@"Backdrop"]
+        || [cn containsString:@"Wallpaper"] || [cn containsString:@"Window"]) return NO;
+    if ([cn containsString:@"ModuleView"] || [cn containsString:@"ButtonModule"]
+        || [cn containsString:@"SliderModule"] || [cn containsString:@"ToggleModule"]
+        || [cn containsString:@"ModuleContainer"] || [cn containsString:@"ContentModule"]
+        || [cn containsString:@"CCUIButton"] || [cn containsString:@"CCUIControl"]) return YES;
+    return NO;
+}
+
 static BOOL CCGFIsCCWindow(UIView *w) {
     NSString *cn = NSStringFromClass([w class]);
     return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
@@ -114,6 +125,10 @@ static int CCGFKillMaterials(UIView *v, int depth) {
     if (depth <= 0 || !v) return 0;
     int n = 0;
     NSString *cn = NSStringFromClass([v class]);
+    if ([cn containsString:@"Background"] || [cn containsString:@"Wallpaper"]) {
+        for (UIView *s in v.subviews) n += CCGFKillMaterials(s, depth - 1);
+        return n;
+    }
     BOOL isMat = [cn containsString:@"Material"] || [cn containsString:@"VisualEffect"]
               || [cn containsString:@"Backdrop"];
     if (isMat) {
@@ -137,6 +152,7 @@ static int CCGFKillMaterials(UIView *v, int depth) {
 
 static void CCGFApply(UIView *root) {
     if (!gGlassDisabled || !gTargetColor || !root) return;
+    if (!CCGFIsModuleView(NSStringFromClass([root class]))) return;  // 只改模块, 不动窗口背景
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
     int n = CCGFRecolorLayer(root.layer);
@@ -213,13 +229,25 @@ static void CCGFInstallLayoutHooks(void) {
     gHookClassCount = (NSUInteger)gHookClassCount2;
 }
 
+// 遍历控制中心里的模块视图
+static int gModCount = 0;
+static void CCGETCMods(UIView *v, int depth) {
+    if (depth > 22 || !v) return;
+    if (CCGFIsModuleView(NSStringFromClass([v class]))) {
+        gModCount++;
+        CCGFApply(v);
+        return;   // 模块内部一次处理完, 不再下钻
+    }
+    for (UIView *s in v.subviews) CCGETCMods(s, depth + 1);
+}
+
 // ---------- 巡查 ----------
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
         UIWindow *w = CCGFCCWindow();
         if (!w) return;
-        CCGFApply(w);
+        CCGETCMods(w, 0);
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLog > 3.0) {
             gLastLog = now;
@@ -260,6 +288,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v26 installed: CC-only, layout-time recolor");
+        CCGFLog(@"v27 installed: CC modules only, window background untouched");
     }
 }
