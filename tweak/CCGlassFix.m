@@ -159,6 +159,7 @@ static UIWindow *CCGFCCWindow(void) {
 }
 
 // ---------- hook: layoutSubviews(仅控制中心模块类自己实现的) ----------
+typedef void (*LayoutIMP)(id, SEL);
 static BOOL gInLayout = NO;
 
 static void CCGFFixNow(UIView *v) {
