@@ -17,6 +17,7 @@ static UIColor *gTargetUIColor = nil;
 static BOOL gGlassDisabled = NO;
 static NSHashTable *gPlates = nil;
 static int gFixCount = 0;
+static BOOL gInHook = NO;
 static NSTimeInterval gLastLogW = 0;
 static NSTimeInterval gLastLog = 0;
 static NSUInteger gHookClassCount = 0;
@@ -278,6 +279,48 @@ static int CCGFContainsCCUIView(UIView *v, int depth) {
     return 0;
 }
 
+
+// ---------- 瞬时 hooks: 视图刚进入控制中心层级就改色(早于首帧) ----------
+static BOOL CCGFIsCCWin(UIWindow *w) {
+    if (!w) return NO;
+    NSString *cn = NSStringFromClass([w class]);
+    return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+}
+
+typedef void (*DidAddIMP)(id, SEL, UIView *);
+static DidAddIMP gOrigDidAdd = NULL;
+
+static void CCGFDidAdd(id self, SEL sel, UIView *sub) {
+    gOrigDidAdd(self, sel, sub);
+    if (gInHook || !gGlassDisabled || !gTargetColor || !sub) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    UIView *host = (UIView *)self;
+    if (!CCGFIsCCWin(host.window)) return;
+    gInHook = YES;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    CCGFRecolorLayer(sub.layer);
+    [CATransaction commit];
+    CCGFKillMaterials(sub, 20);
+    gInHook = NO;
+}
+
+typedef void (*DidMoveWindowIMP)(id, SEL);
+static DidMoveWindowIMP gOrigDidMoveW = NULL;
+
+static void CCGFDidMoveWindow(id self, SEL sel) {
+    gOrigDidMoveW(self, sel);
+    if (gInHook || !gGlassDisabled || !gTargetColor) return;
+    if (![self isKindOfClass:[UIView class]]) return;
+    UIView *v = (UIView *)self;
+    if (!CCGFIsCCWin(v.window)) return;
+    gInHook = YES;
+    [CATransaction begin]; [CATransaction setDisableActions:YES];
+    CCGFRecolorLayer(v.layer);
+    [CATransaction commit];
+    CCGFKillMaterials(v, 20);
+    gInHook = NO;
+}
+
 static void CCGFTick(void) {
     @autoreleasepool {
         gGlassDisabled = CCGFGlassOff();
@@ -336,6 +379,22 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f CC-only", getpid(), gGray]);
         CCGFInstallLayoutHooks();
         CCGFLog([NSString stringWithFormat:@"layout hooks installed on %lu classes", (unsigned long)gHookClassCount]);
+        Method mda = class_getInstanceMethod([UIView class], @selector(didAddSubview:));
+        if (mda) {
+            gOrigDidAdd = (DidAddIMP)method_getImplementation(mda);
+            method_setImplementation(mda, imp_implementationWithBlock(^void(id self, UIView *sub){
+                CCGFDidAdd(self, @selector(didAddSubview:), sub);
+            }));
+            CCGFLog(@"hooked UIView didAddSubview:");
+        }
+        Method mdw = class_getInstanceMethod([UIView class], @selector(didMoveToWindow));
+        if (mdw) {
+            gOrigDidMoveW = (DidMoveWindowIMP)method_getImplementation(mdw);
+            method_setImplementation(mdw, imp_implementationWithBlock(^void(id self){
+                CCGFDidMoveWindow(self, @selector(didMoveToWindow));
+            }));
+            CCGFLog(@"hooked UIView didMoveToWindow:");
+        }
         NSTimer *t = [NSTimer timerWithTimeInterval:0.2 repeats:YES block:^(NSTimer *tm){
             @autoreleasepool { CCGFTick(); }
         }];
@@ -345,6 +404,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v27w installed: probe all windows for white layers");
+        CCGFLog(@"v28 installed: instant hooks on didAddSubview/didMoveToWindow");
     }
 }
