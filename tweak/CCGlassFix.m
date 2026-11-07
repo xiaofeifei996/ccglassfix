@@ -297,6 +297,7 @@ static int CCGFRecolor(CALayer *layer) {
 
 static int CCGFScanMaterials(UIView *v, int depth);
 static void CCGFCCViewDump(UIWindow *w);
+static int CCGFScanCCTints(UIView *v, int depth);
 
 static const void *kCCTintKey = &kCCTintKey;
 
@@ -410,8 +411,10 @@ static void CCGFTick(void) {
                     CCGFLog([NSString stringWithFormat:@"CC strong=%d plates=%lu mats=%lu matFix=%d",
                              strong, (unsigned long)gPlates.count, (unsigned long)gMats.count, gMatFixes]);
                 }
+                int tints = CCGFScanCCTints(w, 14);
                 CCGFCCDiag(w);
                 CCGFCCViewDump(w);
+                if (tints > 0) CCGFLog([NSString stringWithFormat:@"CC tints +%d", tints]);
                 continue;
             }
             if ([cn containsString:@"Library"]) { CCGFApplyToView(w); continue; }
@@ -444,6 +447,22 @@ static void CCGFWatchPlates(void) {
 }
 
 // ---------------- 帧级录制 ----------------
+
+static int CCGFScanCCTints(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    int n = 0;
+    NSString *cn = NSStringFromClass([v class]);
+    BOOL isModule = [cn containsString:@"ModuleView"] || [cn containsString:@"ButtonModule"]
+                 || [cn containsString:@"SliderModule"] || [cn containsString:@"ToggleModule"]
+                 || [cn containsString:@"ControlCenterButton"] || [cn containsString:@"CCUIButton"];
+    if (isModule && CCGFInCCWindow(v)) {
+        CGFloat area = v.bounds.size.width * v.bounds.size.height;
+        if (area >= 900 && CCGFAddCCTint(v)) n++;
+    }
+    for (UIView *s in v.subviews) n += CCGFScanCCTints(s, depth - 1);
+    return n;
+}
+
 // ---------------- 控制中心白色图层诊断 ----------------
 static int gCCDumps = 0;
 static NSTimeInterval gCCLastDump = 0;
