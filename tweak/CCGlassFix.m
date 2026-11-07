@@ -1,6 +1,7 @@
-// CCGlassFix v13 - 控制中心 / App资源库 / 主屏搜索 / 文件夹 白底 -> 深色(可配置)
-// v13: 白底其实是材质层(MTMaterialView / UIVisualEffectView), 直接把 effect 置空 + 铺深色
-//      并对所有材质层做逐帧看护, 消除打开文件夹时的白闪
+// CCGlassFix v14 - 控制中心 / App资源库 / 搜索 / App文件夹 的白色底 -> 深色(可配置)
+// 白色底的真实来源是材质层: UIVisualEffectView / MTMaterialView(私有), 而非 backgroundColor
+// 策略: 定位到"文件夹/搜索/资源库/控制中心"作用域内的材质层 -> 去掉材质(effect=nil/隐藏backdrop) + 铺深色
+//       逐帧看护, 系统重新加回材质就再压掉, 消除打开文件夹/滑动时的白闪
 #import <Foundation/Foundation.h>
 #import <UIKit/UIKit.h>
 #import <QuartzCore/QuartzCore.h>
@@ -10,16 +11,15 @@ static NSString *const kLogPath = @"/var/tmp/ccglassfix.log";
 static CGFloat gGray = 0.13;
 static CGFloat gAlpha = 0.92;
 static NSTimeInterval gLastLogTime = 0;
-static int gTotalRecolored = 0;
 static int gWatchFixes = 0;
 static int gAddFixes = 0;
 static int gHookFixes = 0;
+static int gMatFixes = 0;
 static CGColorRef gTargetColor = NULL;
 static UIColor *gTargetUIColor = nil;
 static BOOL gGlassDisabledCached = NO;
-static NSHashTable *gPlates = nil;
-static int gDumps = 0;
-static NSTimeInterval gLastDump = 0;
+static NSHashTable *gPlates = nil;     // 白色底板图层
+static NSHashTable *gMats = nil;       // 材质视图(已处理)
 
 static void CCGFLog(NSString *msg) {
     @autoreleasepool {
@@ -69,10 +69,91 @@ static BOOL CCGFColorIsWhite(CGColorRef c) {
 
 static BOOL CCGFClassIsTarget(NSString *cn) {
     return [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"]
-        || [cn containsString:@"Search"];
+        || [cn containsString:@"Search"] || [cn containsString:@"Folder"];
 }
 
-// 沿 superlayer 链判断该图层是否处于 控制中心 / App资源库 / 搜索 容器内
+// ---------- 材质层 ----------
+static BOOL CCGFIsMaterialClass(NSString *cn) {
+    return [cn containsString:@"VisualEffect"] || [cn containsString:@"Material"]
+        || [cn containsString:@"Backdrop"];
+}
+
+// 墙纸/主屏底板不能动(否则背景被盖成深色)
+static BOOL CCGFIsWallpaperClass(NSString *cn) {
+    return [cn containsString:@"HomeScreenBackdrop"] || [cn containsString:@"Wallpaper"];
+}
+
+// 材质视图是否处于需要变暗的作用域(文件夹/搜索/资源库/控制中心)
+static BOOL CCGFMatInScope(UIView *v) {
+    NSString *selfCn = NSStringFromClass([v class]);
+    if (CCGFIsWallpaperClass(selfCn)) return NO;
+    int hops = 0;
+    for (UIView *cur = v; cur && hops < 14; cur = cur.superview, hops++) {
+        NSString *cn = NSStringFromClass([cur class]);
+        if (CCGFIsWallpaperClass(cn)) return NO;      // 属于墙纸层, 跳过
+        if (CCGFClassIsTarget(cn)) return YES;
+        if ([cur isKindOfClass:[UIWindow class]])
+            return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
+    }
+    return NO;
+}
+
+// 把一个材质视图压成实心深色(幂等, 可反复调用)
+static BOOL CCGFFixMaterialView(UIView *v) {
+    if (!gTargetUIColor) return NO;
+    NSString *cn = NSStringFromClass([v class]);
+    if (!CCGFIsMaterialClass(cn)) return NO;
+    if (!CCGFMatInScope(v)) return NO;
+    BOOL did = NO;
+    if ([v isKindOfClass:[UIVisualEffectView class]]) {
+        UIVisualEffectView *ev = (UIVisualEffectView *)v;
+        if (ev.effect != nil) { ev.effect = nil; did = YES; }
+    }
+    // 子层里的 backdrop / 内容层全部压掉
+    for (UIView *s in v.subviews) {
+        NSString *scn = NSStringFromClass([s class]);
+        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"]) {
+            if (s.backgroundColor != gTargetUIColor) s.backgroundColor = [UIColor clearColor];
+            if (!s.hidden) { s.hidden = YES; did = YES; }
+        }
+    }
+    if (v.backgroundColor != gTargetUIColor) { v.backgroundColor = gTargetUIColor; did = YES; }
+    if (did) gMatFixes++;
+    [gMats addObject:v];
+    return did;
+}
+
+static int CCGFScanMaterials(UIView *v, int depth) {
+    if (depth <= 0 || !v) return 0;
+    int n = 0;
+    if (CCGFIsMaterialClass(NSStringFromClass([v class]))) {
+        if (CCGFFixMaterialView(v)) n++;
+        // 材质视图内部不再下钻
+    }
+    for (UIView *s in v.subviews) n += CCGFScanMaterials(s, depth - 1);
+    return n;
+}
+
+static void CCGFWatchMaterials(void) {
+    if (!gGlassDisabledCached || !gTargetUIColor || gMats.count == 0) return;
+    NSArray *all = gMats.allObjects;
+    for (UIView *v in all) {
+        @autoreleasepool {
+            if ([v isKindOfClass:[UIVisualEffectView class]]) {
+                if (((UIVisualEffectView *)v).effect != nil) {
+                    ((UIVisualEffectView *)v).effect = nil;
+                    v.backgroundColor = gTargetUIColor;
+                    gWatchFixes++;
+                }
+            } else if (v.hidden || CCGFColorIsWhite(v.layer.backgroundColor) == NO) {
+                // 被系统重新加回了 backdrop / 颜色
+                if (CCGFFixMaterialView(v)) gWatchFixes++;
+            }
+        }
+    }
+}
+
+// ---------- 白色底板(CALayer) ----------
 static BOOL CCGFLayerInTarget(CALayer *layer) {
     int hops = 0;
     for (CALayer *cur = layer; cur && hops < 80; cur = cur.superlayer, hops++) {
@@ -80,9 +161,8 @@ static BOOL CCGFLayerInTarget(CALayer *layer) {
         if (d && [d isKindOfClass:[UIView class]]) {
             NSString *cn = NSStringFromClass([d class]);
             if (CCGFClassIsTarget(cn)) return YES;
-            if ([d isKindOfClass:[UIWindow class]]) {
+            if ([d isKindOfClass:[UIWindow class]])
                 return [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
-            }
         }
     }
     return NO;
@@ -103,7 +183,6 @@ static BOOL CCGFLayerShapeOK(CALayer *layer) {
     return layer.cornerRadius >= 15.0 || area >= 1200.0;
 }
 
-// 把白底板改成目标色; 返回是否改动
 static BOOL CCGFApplyColor(CALayer *l) {
     BOOL isFill = NO;
     if (!CCGFWhiteColorOf(l, &isFill)) return NO;
@@ -113,56 +192,6 @@ static BOOL CCGFApplyColor(CALayer *l) {
     return YES;
 }
 
-// ---------- 材质层(白底的真正来源) ----------
-static NSHashTable *gEffects = nil;   // 已处理的 UIVisualEffectView(弱引用)
-
-// 该材质层是否属于需要变暗的区域(控制中心/资源库/主屏/文件夹)
-static BOOL CCGFViewInScope(UIView *v) {
-    int hops = 0;
-    for (UIView *cur = v; cur && hops < 12; cur = cur.superview, hops++) {
-        NSString *cn = NSStringFromClass([cur class]);
-        if (CCGFClassIsTarget(cn)) return YES;
-        if ([cur isKindOfClass:[UIWindow class]])
-            return [cn containsString:@"HomeScreen"] || [cn containsString:@"ControlCenter"]
-                || [cn containsString:@"SBControl"];
-    }
-    return NO;
-}
-
-// 把材质视图变成实心深色(去掉毛玻璃, 消除白色)
-static void CCGFKillEffect(UIVisualEffectView *ev) {
-    ev.effect = nil;
-    ev.backgroundColor = gTargetUIColor;
-    // 清掉残留的 backdrop / content 白层
-    for (UIView *s in ev.subviews) {
-        NSString *cn = NSStringFromClass([s class]);
-        if ([cn containsString:@"Backdrop"] || [cn containsString:@"VisualEffectContent"]) {
-            s.backgroundColor = [UIColor clearColor];
-        }
-    }
-    [gEffects addObject:ev];
-}
-
-static int CCGFScanEffects(UIView *v, int depth) {
-    if (depth <= 0 || !v) return 0;
-    int n = 0;
-    if ([v isKindOfClass:[UIVisualEffectView class]]) {
-        if (CCGFViewInScope(v) && v.effect != nil) { CCGFKillEffect((UIVisualEffectView *)v); n++; }
-    }
-    for (UIView *s in v.subviews) n += CCGFScanEffects(s, depth - 1);
-    return n;
-}
-
-// 逐帧看护材质层: 系统重新给 effect 就再置空
-static void CCGFWatchEffects(void) {
-    if (!gGlassDisabledCached || !gTargetUIColor) return;
-    NSArray *all = gEffects.allObjects;
-    for (UIVisualEffectView *ev in all) {
-        if (ev.effect != nil) { ev.effect = nil; ev.backgroundColor = gTargetUIColor; gWatchFixes++; }
-    }
-}
-
-// ---------- 巡查 ----------
 static int CCGFRecolor(CALayer *layer) {
     int changed = 0;
     for (CALayer *sub in layer.sublayers) changed += CCGFRecolor(sub);
@@ -170,86 +199,23 @@ static int CCGFRecolor(CALayer *layer) {
     return changed;
 }
 
-static void CCGFApplyToWindow(UIView *win, NSString *from) {
-    if (!gGlassDisabledCached || !gTargetColor) return;
+static int CCGFApplyToView(UIView *win, NSString *from) {
+    if (!gGlassDisabledCached || !gTargetColor) return 0;
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    int changed = CCGFRecolor(win.layer);
+    int plates = CCGFRecolor(win.layer);
     [CATransaction commit];
-    int eff = CCGFScanEffects(win, 40);   // 材质层(白色毛玻璃)一起去掉
-    if (changed + eff > 0) {
-        gTotalRecolored += changed + eff;
+    int mats = CCGFScanMaterials(win, 40);
+    if (plates + mats > 0) {
         NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
         if (now - gLastLogTime > 1.0) {
             gLastLogTime = now;
-            CCGFLog([NSString stringWithFormat:@"%@: plates=%d effects=%d (plates=%lu effs=%lu watch=%d add=%d hook=%d)",
-                     from, changed, eff, (unsigned long)gPlates.count, (unsigned long)gEffects.count,
-                     gWatchFixes, gAddFixes, gHookFixes]);
+            CCGFLog([NSString stringWithFormat:@"%@ plates=%d mats=%d (reg p=%lu m=%lu watch=%d add=%d hook=%d mat=%d)",
+                     from, plates, mats, (unsigned long)gPlates.count, (unsigned long)gMats.count,
+                     gWatchFixes, gAddFixes, gHookFixes, gMatFixes]);
         }
     }
-}
-
-static int CCGFApplyToSubtrees(UIView *v, int depth) {
-    if (depth <= 0 || !v) return 0;
-    if (CCGFClassIsTarget(NSStringFromClass([v class]))) {
-        [CATransaction begin];
-        [CATransaction setDisableActions:YES];
-        int changed = CCGFRecolor(v.layer);
-        [CATransaction commit];
-        return changed;
-    }
-    int total = 0;
-    for (UIView *s in v.subviews) total += CCGFApplyToSubtrees(s, depth - 1);
-    return total;
-}
-
-static BOOL CCGFHasTarget(UIView *v, int depth) {
-    if (depth <= 0 || !v) return NO;
-    if (CCGFClassIsTarget(NSStringFromClass([v class]))) return YES;
-    for (UIView *s in v.subviews)
-        if (CCGFHasTarget(s, depth - 1)) return YES;
-    return NO;
-}
-
-// ---------- 诊断: 列出主屏里剩下的白色图层 ----------
-static NSString *CCGFChain(CALayer *l) {
-    NSMutableString *ms = [NSMutableString string];
-    int hops = 0;
-    for (CALayer *cur = l; cur && hops < 6; cur = cur.superlayer, hops++) {
-        id d = cur.delegate;
-        NSString *cn = d ? NSStringFromClass([d class]) : NSStringFromClass([cur class]);
-        [ms appendFormat:@"%@/", cn];
-    }
-    return ms;
-}
-
-static int gDiagCount = 0;
-static void CCGFDiag(CALayer *layer, NSString *ctx) {
-    if (gDiagCount > 60) return;
-    for (CALayer *sub in layer.sublayers) CCGFDiag(sub, ctx);
-    BOOL isFill = NO;
-    CGColorRef c = CCGFWhiteColorOf(layer, &isFill);
-    CGFloat w = layer.frame.size.width, h = layer.frame.size.height;
-    if (!c) {
-        // 非纯背景色: 记录视觉特效层(胶囊/材质)与带图内容的大图层
-        id d = layer.delegate;
-        NSString *dcn = d ? NSStringFromClass([d class]) : @"-";
-        if ([dcn containsString:@"VisualEffect"] || [dcn containsString:@"Backdrop"]
-            || [dcn containsString:@"Material"]) {
-            gDiagCount++;
-            CCGFLog([NSString stringWithFormat:@"DIAG %@ EFFECT dcn=%@ size=%.0fx%.0f r=%.0f chain=%@",
-                     ctx, dcn, w, h, layer.cornerRadius, CCGFChain(layer)]);
-        } else if (layer.contents && w * h > 8000) {
-            gDiagCount++;
-            CCGFLog([NSString stringWithFormat:@"DIAG %@ CONTENT dcn=%@ size=%.0fx%.0f r=%.0f chain=%@",
-                     ctx, dcn, w, h, layer.cornerRadius, CCGFChain(layer)]);
-        }
-        return;
-    }
-    if (w * h < 400) return;
-    gDiagCount++;
-    CCGFLog([NSString stringWithFormat:@"DIAG %@ cls=%@ fill=%d size=%.0fx%.0f r=%.0f chain=%@",
-             ctx, NSStringFromClass([layer class]), (int)isFill, w, h, layer.cornerRadius, CCGFChain(layer)]);
+    return plates + mats;
 }
 
 static void CCGFTick(void) {
@@ -262,26 +228,13 @@ static void CCGFTick(void) {
             NSString *cn = NSStringFromClass([w class]);
             BOOL isCC = [cn containsString:@"ControlCenter"] || [cn containsString:@"SBControl"];
             BOOL isLib = [cn containsString:@"Library"] || [cn containsString:@"AppLibrary"];
-            if (isCC || isLib) {
-                CCGFApplyToWindow(w, isCC ? @"tickCC" : @"tickLib");
-                continue;
-            }
-            if ([cn containsString:@"HomeScreen"]) {
-                // 不再等资源库出现: 每次 tick 全量扫主屏窗口(与 v9 一致, 重启即生效)
-                CCGFApplyToWindow(w, @"tickHome");
-                NSTimeInterval now2 = [NSDate timeIntervalSinceReferenceDate];
-                if (gDumps < 3 && now2 - gLastDump > 12.0) {
-                    gLastDump = now2; gDumps++;
-                    gDiagCount = 0;
-                    CCGFDiag(w.layer, @"home");
-                    CCGFLog([NSString stringWithFormat:@"DIAG end #%d count=%d", gDumps, gDiagCount]);
-                }
-            }
+            if (isCC || isLib) { CCGFApplyToView(w, isCC ? @"tickCC" : @"tickLib"); continue; }
+            if ([cn containsString:@"HomeScreen"]) CCGFApplyToView(w, @"tickHome");
         }
     }
 }
 
-// ---------- 逐帧看护 ----------
+// ---------- 逐帧看护: 已登记的底板 ----------
 static void CCGFWatchPlates(void) {
     if (!gGlassDisabledCached || !gTargetColor || gPlates.count == 0) return;
     NSArray *all = gPlates.allObjects;
@@ -298,7 +251,7 @@ static void CCGFWatchPlates(void) {
     [CATransaction commit];
 }
 
-// ---------- 源头 hook ----------
+// ---------- hook: setBackgroundColor ----------
 typedef void (*SetBGIMP)(id, SEL, CGColorRef);
 static SetBGIMP gOrigSetBG = NULL;
 
@@ -329,6 +282,7 @@ static void CCGFUIViewSetBG(id self, SEL sel, UIColor *color) {
     gOrigUIViewSetBG(self, sel, color);
 }
 
+// ---------- hook: addSublayer (材质层/底板出现的当帧就处理, 消除白闪) ----------
 typedef void (*AddSublayerIMP)(id, SEL, CALayer *);
 static AddSublayerIMP gOrigAddSublayer = NULL;
 
@@ -341,7 +295,29 @@ static int CCGFRecolorSub(CALayer *layer) {
 
 static void CCGFAddSublayer(id self, SEL sel, CALayer *sub) {
     gOrigAddSublayer(self, sel, sub);
-    if (gTargetColor && gGlassDisabledCached && sub && CCGFLayerInTarget(sub)) {
+    if (!gTargetColor || !gGlassDisabledCached || !sub) return;
+    // 1) 新加的材质层(文件夹/搜索面板背景)立即压掉
+    id d = sub.delegate;
+    if (d && [d isKindOfClass:[UIView class]]) {
+        UIView *dv = (UIView *)d;
+        if (CCGFIsMaterialClass(NSStringFromClass([dv class]))) {
+            if (CCGFFixMaterialView(dv)) gAddFixes++;
+            return;
+        }
+        // 材质视图内部被重新加回 backdrop 时, 立刻隐藏
+        NSString *scn = NSStringFromClass([dv class]);
+        if (CCGFIsMaterialClass(scn) || [scn containsString:@"ContentView"]) {
+            UIView *parent = dv.superview;
+            if (parent && CCGFIsMaterialClass(NSStringFromClass([parent class]))
+                && CCGFMatInScope(parent)) {
+                dv.hidden = YES;
+                gAddFixes++;
+            }
+            return;
+        }
+    }
+    // 2) 新加的白色底板
+    if (CCGFLayerInTarget(sub)) {
         [CATransaction begin];
         [CATransaction setDisableActions:YES];
         gAddFixes += CCGFRecolorSub(sub);
@@ -349,7 +325,7 @@ static void CCGFAddSublayer(id self, SEL sel, CALayer *sub) {
     }
 }
 
-// ---------- SBControlCenterWindow hooks ----------
+// ---------- hook: SBControlCenterWindow ----------
 typedef id (*InitSceneIMP)(id, SEL, id);
 typedef void (*SetHiddenIMP)(id, SEL, BOOL);
 
@@ -375,7 +351,7 @@ static void CCGFHookWin(Class cls, SEL sel) {
 __attribute__((constructor)) static void CCGlassFixInit(void) {
     @autoreleasepool {
         gPlates = [NSHashTable weakObjectsHashTable];
-        gEffects = [NSHashTable weakObjectsHashTable];
+        gMats = [NSHashTable weakObjectsHashTable];
         CCGFLoadColor();
         CCGFLog([NSString stringWithFormat:@"loaded pid=%d gray=%.2f a=%.2f", getpid(), gGray, gAlpha]);
         Method m = class_getInstanceMethod([CALayer class], @selector(setBackgroundColor:));
@@ -384,7 +360,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
             method_setImplementation(m, imp_implementationWithBlock(^void(id self, CGColorRef c){
                 CCGFSetBGColor(self, @selector(setBackgroundColor:), c);
             }));
-            CCGFLog(@"hooked CALayer setBackgroundColor:");
         }
         Method mv = class_getInstanceMethod([UIView class], @selector(setBackgroundColor:));
         if (mv) {
@@ -392,7 +367,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
             method_setImplementation(mv, imp_implementationWithBlock(^void(id self, UIColor *c){
                 CCGFUIViewSetBG(self, @selector(setBackgroundColor:), c);
             }));
-            CCGFLog(@"hooked UIView setBackgroundColor:");
         }
         Method ma = class_getInstanceMethod([CALayer class], @selector(addSublayer:));
         if (ma) {
@@ -400,7 +374,6 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
             method_setImplementation(ma, imp_implementationWithBlock(^void(id self, CALayer *s){
                 CCGFAddSublayer(self, @selector(addSublayer:), s);
             }));
-            CCGFLog(@"hooked CALayer addSublayer:");
         }
         Class winCls = NSClassFromString(@"SBControlCenterWindow");
         if (winCls) {
@@ -412,10 +385,10 @@ __attribute__((constructor)) static void CCGlassFixInit(void) {
         }];
         [[NSRunLoop mainRunLoop] addTimer:t forMode:NSRunLoopCommonModes];
         CADisplayLink *dl = [CADisplayLink displayLinkWithTarget:[NSBlockOperation blockOperationWithBlock:^{
-            @autoreleasepool { CCGFWatchPlates(); CCGFWatchEffects(); }
+            @autoreleasepool { CCGFWatchPlates(); CCGFWatchMaterials(); }
         }] selector:@selector(main)];
         dl.preferredFramesPerSecond = 0;
         [dl addToRunLoop:[NSRunLoop mainRunLoop] forMode:NSRunLoopCommonModes];
-        CCGFLog(@"v11 installed: hooks + addSublayer + tick 0.25s + native-Hz watch + diag");
+        CCGFLog(@"v14 installed: material killer + plate hooks + 0.25s tick + native-Hz watch");
     }
 }
